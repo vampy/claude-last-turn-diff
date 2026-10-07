@@ -9,7 +9,7 @@
       "type": "boolean",
       "title": "Open the pane after each turn",
       "description": "Opens the Last turn pane when a turn ends with file changes.",
-      "default": false
+      "default": true
     }
   }
 }

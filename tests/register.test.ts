@@ -317,7 +317,7 @@ describe('band and command', () => {
     expect(await band.find({ key: 'view' })).toBeUndefined()
   })
 
-  test('/turn-diff toggles the pane and says what changed', async ($, on) => {
+  test('/turn-diff toggles the pane and says what changed', { options: { autoOpen: false } }, async ($, on) => {
     const { panes } = world(on, { 'C:\\proj\\a.txt': 'a\n' })
     await $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true })
     expect(await $.command.run(RUN)).toMatchObject({ text: 'No turn has finished yet.' })
@@ -336,7 +336,7 @@ describe('band and command', () => {
     expect(await $.command.run(RUN)).toMatchObject({ text: 'T2 · 1 file · +1 −1: a.txt' })
   })
 
-  test('the pane does not open by itself by default', async ($, on) => {
+  test('with autoOpen off the pane does not open by itself', { options: { autoOpen: false } }, async ($, on) => {
     const { panes } = world(on, { 'C:\\proj\\a.txt': 'a\n' })
     await start($, 't1')
     await edit($, 'a.txt', 'a', 'A')
@@ -344,7 +344,7 @@ describe('band and command', () => {
     expect([...panes]).toEqual([])
   })
 
-  test('autoOpen opens the pane after a main turn with edits, not after one without', { options: { autoOpen: true } }, async ($, on) => {
+  test('by default the pane opens after a main turn with edits, not after one without', async ($, on) => {
     const { panes } = world(on, { 'C:\\proj\\a.txt': 'a\n' })
     await start($, 't1')
     await edit($, 'a.txt', 'a', 'A')

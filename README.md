@@ -46,17 +46,17 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
 
 ## Options
 
-- `autoOpen` (off by default): open the pane by itself when a turn ends with file changes. Like any pane
+- `autoOpen` (on by default): open the pane by itself when a turn ends with file changes. Like any pane
   opened unasked, it is shown only in a terminal at least 144 columns wide (110 once you have opened it
   yourself); below that it waits, and `/turn-diff` shows it.
 
-In a terminal, set it in `/config`. The Desktop Code tab has no `/config`: add this to
+To turn it off in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
 `~/.claude/settings.json` and start a new session. Project settings are not read for plugin options. The
 key `last-turn-diff@inline` works too; it is the one `claude plugin configure` writes.
 
 ```json
 "pluginConfigs": {
-  "last-turn-diff": { "options": { "autoOpen": true } }
+  "last-turn-diff": { "options": { "autoOpen": false } }
 }
 ```
 
