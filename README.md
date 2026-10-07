@@ -79,3 +79,15 @@ git; the engine rewrites it on every load).
   block holds at most 10,000 characters, and each page about 90,000, to stay well under the ~256 KB draw
   that reportedly freezes a pane. A turn touching several hundred files could still go past that.
 - Jumping to a file scrolls the pane only where the surface supports it. The page switches either way.
+
+## Roadmap
+
+- **Turn picker**: choose T1…Tn in the pane, rebuilt from `$.session.messages()` so history survives
+  `--resume`. Rebuilt turns can't flag line-ending changes, and only the newest 4,096 transcript
+  entries are available.
+- **Shell edits**: catch files changed by commands and scripts, by snapshotting the version
+  control's status and file contents around each turn.
+- **Auto-open**: a `userConfig` option to open the pane when a turn ends.
+- **Comments and undo**: send comments on hunks back to Claude; undo a whole turn.
+- **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
+  `/plugin install`, and `claude plugin tag` for releases.
