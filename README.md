@@ -10,8 +10,10 @@ show too: the mod reads the version control's status around each turn.
   is all you get on mobile.
 - The pane header reads `T3 · 3 files · +12 −4`, with the prompt's first line under it, and a note when
   shell changes could not be read. Below that is one row per file (path, counts, and `new` / `deleted` /
-  `CRLF→LF` / `binary` / `too large` badges); pressing a row jumps to that file. Each file's hunks follow
-  in `diff` code blocks. A large turn is split into pages with Prev/Next.
+  `CRLF→LF` / `binary` / `too large` badges); pressing a row jumps to that file. Each file's hunks follow:
+  in the terminal as `diff` code blocks; in the Desktop Code tab as images with red and green lines, line
+  numbers and syntax colors, each under its `@@` line and a Copy button (see `svgDiffs`). A large turn is
+  split into pages with Prev/Next.
 - The band above the prompt reads `Last turn: 3 files +12 −4  [ View ]  [ x ]` after a turn with edits.
   View opens the pane; x hides the band until the next turn.
 
@@ -81,14 +83,20 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
   `Write` and `NotebookEdit` calls. Turn it off if a status is slow in your repository or workspace: in a
   large Plastic workspace each `cm status` takes a few seconds (2.3 s on a big Unreal project), and each
   base revision fetched from a cloud repository about a second.
+- `svgDiffs` (on by default): in the Desktop Code tab, draw each file's hunks as SVG images. Desktop (app
+  2.26454) draws a `Code` element's `format: 'diff'` as plain `diff` text, with no line numbers, line
+  backgrounds or language colors, so the mod draws them itself. An image's text can't be selected, so each
+  hunk has a Copy button that puts its lines as they are now (unchanged and added, no markers) on the
+  clipboard. Off, Desktop shows the plain `diff` code blocks the terminal gets. Turn it off if the images
+  ever draw wrong.
 
-To turn either off in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
+To turn any of them off in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
 `~/.claude/settings.json` and start a new session. Project settings are not read for plugin options. The
 key `last-turn-diff@inline` works too; it is the one `claude plugin configure` writes.
 
 ```json
 "pluginConfigs": {
-  "last-turn-diff": { "options": { "autoOpen": false, "shellEdits": false } }
+  "last-turn-diff": { "options": { "autoOpen": false, "shellEdits": false, "svgDiffs": false } }
 }
 ```
 
@@ -140,9 +148,18 @@ git; the engine rewrites it on every load).
   shows at most about 60,000 characters of diff, and the rest is counted in a note.
 - Desktop (app 2.26454) draws no mod UI for a session shown in the second half of a split view: no
   pane, no band, though `/turn-diff` still answers. Show the session on its own to see them.
-- Desktop: code isn't selectable, long lines wrap, and nothing scrolls inside a pane on its own. Each code
-  block holds at most 10,000 characters, and each page about 90,000, to stay well under the ~256 KB draw
-  that reportedly freezes a pane. A turn touching several hundred files could still go past that.
+- Desktop: code isn't selectable, long lines wrap, and nothing scrolls inside a pane on its own. Desktop
+  refuses a draw past 2,000 elements or 262,144 characters. Each code block holds at most 10,000
+  characters and each page about 90,000; with `svgDiffs` each file draws at most about 150,000 characters
+  of SVG (roughly 800 to 2,000 lines, the rest counted in a note) and each page about 160,000. A turn
+  touching several hundred files could still go past the limit.
+- Desktop images (`svgDiffs`): the colors come from a small lexer in `hooks/svg.ts` (comments, strings,
+  numbers, one shared keyword list), not from Desktop's highlighter or theme, so they are approximate.
+  Multi-line strings aren't tracked. Wide characters (CJK, emoji) can push a row past its wrap width. The
+  image is laid out for the pane's width when drawn, and scales down if the pane gets narrower. Selectable
+  text would need interactive `Svg`s, each a sandboxed frame, but Desktop rebuilds the pane on every
+  redraw, a scroll included, and every frame flashes white as it reloads. A Copy takes the whole hunk,
+  including lines past the drawing's cap; a line cut at 2,000 characters for display is copied cut.
 - Jumping to a file scrolls the pane only where the surface supports it. The page switches either way.
 
 ## Roadmap

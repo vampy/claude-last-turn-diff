@@ -3,7 +3,8 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { CODE_CAP, MAX_SIZE } from '../hooks/diff'
-import { parseHunks } from './parse'
+import { SVG_CAP } from '../hooks/svg'
+import { parseHunks, svgRows } from './parse'
 
 const PLUGIN = 'last-turn-diff'
 const CWD = 'C:\\proj'
@@ -288,7 +289,7 @@ function textOf(node: unknown): string {
   return element?.type === 'Box' ? parts.filter(part => part !== '').join('  ') : parts.join('')
 }
 
-/** The pane drawn: its header, file rows, Texts, Buttons' labels and Code blocks. */
+/** The pane drawn: its header, file rows, Texts, Buttons' labels, Code blocks and Svg images. */
 async function look(ui: Awaited<ReturnType<typeof mountPane>>) {
   const header = textOf(await ui.find({ key: 'header' }))
   const rows = (await ui.findAll({ type: 'Box' })).filter(found => found.key?.startsWith('line-')).map(textOf)
@@ -298,7 +299,11 @@ async function look(ui: Awaited<ReturnType<typeof mountPane>>) {
     path: found.props.path,
     source: String(found.props.source),
   }))
-  return { header, rows, texts, buttons, codes }
+  const svgs = (await ui.findAll({ type: 'Svg' })).map(found => ({
+    alt: String(found.props.alt),
+    source: String(found.props.source),
+  }))
+  return { header, rows, texts, buttons, codes, svgs }
 }
 
 const pane = async ($: Engine, surface: (typeof SURFACES)[number]) => look(await mountPane($, surface))
@@ -311,11 +316,20 @@ describe('recording', () => {
     await $.tool.call({ tool: 'Edit', file_path: 'c:/PROJ/A.txt', old_string: 'three', new_string: 'THREE' })
     await complete($, 't1')
     for (const surface of SURFACES) {
-      const { header, rows, codes } = await pane($, surface)
+      const { header, rows, texts, codes, svgs } = await pane($, surface)
       expect(header).toBe('T1 · 1 file · +2 −2  Fix the thing')
       expect(rows).toEqual(['a.txt  +2 −2'])
       // CRLF on both sides: no line-ending flag although the tool reported LF
-      expect(codes).toEqual([{ path: 'a.txt', source: '@@ -1,3 +1,3 @@\n one\n-two\n-three\n+TWO\n+THREE' }])
+      if (surface === 'terminal') {
+        expect(codes).toEqual([{ path: 'a.txt', source: '@@ -1,3 +1,3 @@\n one\n-two\n-three\n+TWO\n+THREE' }])
+        expect(svgs).toEqual([])
+      } else {
+        expect(codes).toEqual([])
+        expect(texts).toContain('@@ -1,3 +1,3 @@')
+        expect(svgs.map(({ alt, source }) => [alt, svgRows(source)])).toEqual([
+          ['Diff of a.txt, @@ -1,3 +1,3 @@', ['1   one', '2 - two', '3 - three', '2 + TWO', '3 + THREE']],
+        ])
+      }
     }
   })
 
@@ -405,24 +419,33 @@ describe('pane', () => {
       expect(drawn.texts).toContain('Page 1 of 3')
       expect(drawn.buttons).toContain('Next')
       expect(drawn.buttons).not.toContain('Prev')
-      const pages = [drawn.codes]
+      const pages = [drawn]
       await ui.press({ key: 'next' })
       drawn = await look(ui)
       expect(drawn.texts).toContain('Page 2 of 3')
-      pages.push(drawn.codes)
+      pages.push(drawn)
       await ui.press({ key: 'row-2' })
       drawn = await look(ui)
       expect(drawn.texts).toContain('Page 3 of 3')
       expect(drawn.buttons).toContain('Prev')
       expect(drawn.buttons).not.toContain('Next')
-      pages.push(drawn.codes)
-      expect(pages.map(codes => [...new Set(codes.map(code => code.path))])).toEqual([['x.txt'], ['y.txt'], ['z.txt']])
-      for (const codes of pages) {
+      pages.push(drawn)
+      const shown = ({ codes, svgs }: typeof drawn) => [
+        ...new Set([...codes.map(code => code.path), ...svgs.map(svg => svg.alt.replace(/^Diff of (.+?), @@.*$/, '$1'))]),
+      ]
+      expect(pages.map(shown)).toEqual([['x.txt'], ['y.txt'], ['z.txt']])
+      for (const { texts, codes, svgs } of pages) {
+        // one count of what is not shown, past the diff's cap or the drawing's
+        expect(texts.filter(text => text.endsWith(' more changed lines not shown'))).toHaveLength(1)
         expect(codes.reduce((sum, code) => sum + code.source.length, 0)).toBeLessThan(100_000)
         for (const { source } of codes) {
           expect(source.length).toBeLessThanOrEqual(CODE_CAP)
           expect(parseHunks(source)).toBeGreaterThan(0)
         }
+        // desktop refuses a draw past 262,144 characters
+        expect(svgs.reduce((sum, svg) => sum + svg.source.length, 0)).toBeLessThan(200_000)
+        for (const { source } of svgs) expect(source.length).toBeLessThanOrEqual(SVG_CAP)
+        expect(svgs.length > 0).toBe(surface === 'desktop')
       }
       await ui.press({ key: 'prev' })
       expect((await look(ui)).texts).toContain('Page 2 of 3')
@@ -430,6 +453,42 @@ describe('pane', () => {
       expect((await look(ui)).texts).toContain('Page 1 of 3')
       await ui.unmount()
     }
+  })
+
+  test("on desktop each hunk's Copy button copies its lines as they are now", async ($, on) => {
+    const copies: { text: string; surface?: string }[] = []
+    on('ui.copy', ($, e) => {
+      copies.push({ text: e.text, surface: e.surface })
+      return { value: { isCopied: true } }
+    })
+    const text = Array.from({ length: 20 }, (_, i) => `const v${i} = ${i}\n`).join('')
+    world(on, { 'C:\\proj\\a.ts': text })
+    await start($, 't1')
+    await edit($, 'a.ts', 'v1 = 1', 'v1 = 10')
+    await edit($, 'a.ts', 'const v18 = 18\n', '')
+    await complete($, 't1')
+    const ui = await mountPane($, 'desktop')
+    expect((await ui.findAll({ type: 'Button', text: 'Copy' })).map(found => found.key)).toEqual(['copy-0-0', 'copy-0-1'])
+    await ui.press({ key: 'copy-0-1' })
+    await ui.press({ key: 'copy-0-0' })
+    expect(copies).toEqual([
+      { text: ['const v15 = 15', 'const v16 = 16', 'const v17 = 17', 'const v19 = 19'].join('\n'), surface: 'desktop' },
+      { text: ['const v0 = 0', 'const v1 = 10', 'const v2 = 2', 'const v3 = 3', 'const v4 = 4'].join('\n'), surface: 'desktop' },
+    ])
+    // the terminal keeps its diff code blocks
+    expect(await (await mountPane($, 'terminal')).findAll({ type: 'Button', text: 'Copy' })).toEqual([])
+  })
+
+  test('with svgDiffs off desktop draws diff code blocks, as the terminal does', { options: { svgDiffs: false } }, async ($, on) => {
+    world(on, { 'C:\\proj\\a.ts': 'const a = 1\n' })
+    await start($, 't1')
+    await edit($, 'a.ts', '1', '2')
+    await complete($, 't1')
+    const ui = await mountPane($, 'desktop')
+    expect(await ui.findAll({ type: 'Svg' })).toEqual([])
+    expect((await ui.findAll({ type: 'Code' })).map(({ props }) => [props.format, props.path, props.source])).toEqual([
+      ['diff', 'a.ts', '@@ -1,1 +1,1 @@\n-const a = 1\n+const a = 2'],
+    ])
   })
 
   test('mobile is left to the engine', async ($, on) => {
@@ -544,12 +603,12 @@ for (const kind of ['git', 'cm'] as const) {
       await start($, 't1')
       await bash($, 'fix')
       await complete($, 't1')
-      const { rows, codes } = await pane($, 'desktop')
+      const { rows, texts, svgs } = await pane($, 'desktop')
       const path = file.replace(/\\/g, '/')
       expect(rows).toEqual([`${path}  +1 −1`])
-      expect(codes).toEqual([
-        { path, source: kind === 'git' ? '@@ -1,2 +1,2 @@\n one\n-two\n+TWO' : '@@ -1,2 +1,2 @@\n Done ✅\n-next\n+next ✅' },
-      ])
+      expect(texts).toContain('@@ -1,2 +1,2 @@')
+      const lines = kind === 'git' ? ['1   one', '2 - two', '2 + TWO'] : ['1   Done ✅', '2 - next', '2 + next ✅']
+      expect(svgs.map(svg => svgRows(svg.source))).toEqual([lines])
     })
 
     test('a file dirty at turn start diffs against its turn-start content; untouched ones do not show', async ($, on) => {

@@ -123,12 +123,15 @@ export function toHunks(ops: readonly Op[]): Hunk[] {
   return hunks
 }
 
-/** The hunk as unified-diff text; an empty side names the line before it, as diff does. */
-export function hunkText(h: Hunk): string {
+/** The hunk's `@@` line; an empty side names the line before it, as diff does. */
+export function hunkHeader(h: Hunk): string {
   const old = h.oldLines === 0 ? h.oldStart - 1 : h.oldStart
   const now = h.newLines === 0 ? h.newStart - 1 : h.newStart
-  return [`@@ -${old},${h.oldLines} +${now},${h.newLines} @@`, ...h.lines].join('\n')
+  return `@@ -${old},${h.oldLines} +${now},${h.newLines} @@`
 }
+
+/** The hunk as unified-diff text. */
+export const hunkText = (h: Hunk) => [hunkHeader(h), ...h.lines].join('\n')
 
 /** Cuts a hunk too long for one Code source into consecutive hunks with their own headers. */
 export function splitHunk(h: Hunk, max = CODE_CAP): Hunk[] {

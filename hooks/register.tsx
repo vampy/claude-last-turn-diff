@@ -4,12 +4,18 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { FileDiff, Hunk, LastTurn, PendingFile, Recording, Vcs } from '../types'
 import { blocks, clean, diffFile, fileKey, MAX_SIZE, paginate, relativePath, textSize } from './diff'
 import type { Entry, Status } from './vcs'
+import { drawHunks } from './svg'
+import type { Drawing } from './svg'
 import { join, nearest, parseCmStatus, parseGitStatus, parseNameStatus, pool } from './vcs'
 
 const PANE = 'last-turn-diff'
 const TITLE = 'Last turn'
 /** Code text per pane draw: Desktop reportedly freezes for good on a draw past ~256 KB. */
 const PAGE_BUDGET = 90_000
+/** Svg text per pane draw on desktop, which refuses a tree past 262,144 characters (the file rows count too). */
+const SVG_PAGE_BUDGET = 160_000
+/** Per hunk on desktop, its header row and Copy button: enough that a page of small hunks stays under 2,000 elements. */
+const HUNK_COST = 800
 /** Status files tracked per turn; past it they are left out of the diff. */
 const MAX_FILES = 1000
 /** Content kept for files dirty at turn start; past it they are recorded by size and mtime. */
@@ -242,12 +248,24 @@ function describe(turn: LastTurn | null): string {
   return `T${turn.turn} · ${count(turn.files)} · +${added} −${removed}: ${names.join(', ')}`
 }
 
+/** diffFile's note for the changed lines past its cap. */
+const MORE = ' more changed lines not shown'
+
+/** The file's notes, the drawing's own cut added to diffFile's count of changed lines not shown. */
+function withHidden(notes: readonly string[], hidden: number): readonly string[] {
+  if (hidden === 0) return notes
+  const cut = notes.find(note => note.endsWith(MORE))
+  return [...notes.filter(note => note !== cut), `${hidden + (cut === undefined ? 0 : parseInt(cut))}${MORE}`]
+}
+
 /** The path cut from the left to fit `room` cells. */
 const fit = (path: string, room: number) => (path.length > room ? `…${path.slice(-(Math.max(room, 10) - 1))}` : path)
 
 export const register: Register = (on, options) => {
   /** The turn-start snapshot in flight; module-local, so a reload drops it and the turn goes on without one. */
   let snapshotting: Promise<unknown> = Promise.resolve()
+  /** The last turn's files drawn as SVG, by the turn and the pane's width: turning a page draws nothing again. */
+  let drawn: { key: string; files: Drawing[] } | undefined
 
   // Also after a hot reload. With shellEdits off nothing runs, and a version control found before is dropped.
   on('session.start', async ($, e, next) => {
@@ -410,9 +428,21 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
+    // Desktop draws a `Code` diff as plain diff text: there each file's hunks are SVG images, unless turned off
+    const Svg = e.surface === 'desktop' && options.svgDiffs !== false ? $.ui.resolve(e).Svg : undefined
+    // ponytail: a turn is known by its number, prompt and per-file counts; a content hash if two ever collide
+    const key = [width, turn.turn, turn.prompt, ...turn.files.map(f => `${f.path} ${f.added} ${f.removed}`)].join('\n')
+    if (Svg !== undefined && drawn?.key !== key) {
+      drawn = { key, files: turn.files.map(file => drawHunks(file.path, file.hunks, width)) }
+    }
+    const svgs = Svg === undefined ? undefined : drawn!.files
     const pages = paginate(
-      turn.files.map(file => textSize(file.hunks)),
-      PAGE_BUDGET,
+      turn.files.map((file, i) =>
+        svgs === undefined
+          ? textSize(file.hunks)
+          : svgs[i]!.hunks.reduce((sum, hunk) => sum + HUNK_COST + hunk.images.reduce((n, image) => n + image.length, 0), 0),
+      ),
+      svgs === undefined ? PAGE_BUDGET : SVG_PAGE_BUDGET,
     )
     const last = pages.length - 1
     const at = Math.min(await read($, page), last)
@@ -446,6 +476,7 @@ export const register: Register = (on, options) => {
         )}
         {(pages[at] ?? []).map(i => {
           const file = turn.files[i]!
+          const drawing = svgs?.[i]
           return (
             <Box key={`file-${i}`} flexDirection="column" marginTop={1}>
               {rule}
@@ -454,12 +485,27 @@ export const register: Register = (on, options) => {
                 {counts(file, file.badges)}
               </Box>
               {rule}
-              {file.notes.map(note => (
+              {withHidden(file.notes, drawing?.hidden ?? 0).map(note => (
                 <Text dimColor>{note}</Text>
               ))}
-              {blocks(file.hunks).map(source => (
-                <Code format="diff" path={file.path} source={clean(source)} />
-              ))}
+              {Svg !== undefined && drawing !== undefined
+                ? drawing.hunks.flatMap((hunk, k) => [
+                    // an image can't be selected: Copy puts the hunk's lines as they are now on the clipboard
+                    <Box justifyContent="space-between" gap={2}>
+                      <Text dimColor>{hunk.header}</Text>
+                      <Button
+                        key={`copy-${i}-${k}`}
+                        plain
+                        label="Copy"
+                        onPress={async press => {
+                          const copied = await $.ui.copy({ text: hunk.code, surface: press.surface })
+                          $.ui.toast(copied.isCopied ? `Copied ${hunk.header}` : `Not copied: ${copied.reason}`)
+                        }}
+                      />
+                    </Box>,
+                    ...hunk.images.map(source => <Svg source={source} alt={`Diff of ${file.path}, ${hunk.header}`} />),
+                  ])
+                : blocks(file.hunks).map(source => <Code format="diff" path={file.path} source={clean(source)} />)}
             </Box>
           )
         })}

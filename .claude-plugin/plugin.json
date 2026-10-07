@@ -16,6 +16,12 @@
       "title": "Show shell edits",
       "description": "Also shows files changed by shell commands, scripts or builds, read from git or Plastic SCM status around each turn.",
       "default": true
+    },
+    "svgDiffs": {
+      "type": "boolean",
+      "title": "Draw diffs as images on Desktop",
+      "description": "In the Desktop Code tab, draws each file's diff as an image with red and green lines, line numbers and syntax colors. Off, Desktop shows plain diff code blocks.",
+      "default": true
     }
   }
 }

@@ -1,3 +1,10 @@
+const textOf = (markup: string) =>
+  markup.replace(/<[^>]*>/g, '').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+
+/** An Svg diff's rows read back as text: each `<text>`, and each of its wrapped rows (a tspan at x 0), tags dropped. */
+export const svgRows = (source: string) =>
+  [...source.matchAll(/<text\b[^>]*>(.*?)<\/text>/g)].flatMap(([, line]) => line!.split(/(?=<tspan x="0")/).map(textOf))
+
 /** Reads a Code source as `format: 'diff'` must: hunks whose headers count the lines that follow. */
 export function parseHunks(source: string): number {
   const rows = source.split('\n')
