@@ -272,7 +272,10 @@ export const register: Register = (on, options) => {
   // ($.session.turns() counts a command's rows as turns, so the mod counts its own.)
   on('turn.start', async ($, e, next) => {
     const turn = await update($, turns, n => n + 1)
-    const first = e.text.split('\n').find(line => line.trim() !== '') ?? ''
+    // a turn a finished background task starts carries its notification, not a prompt: show its summary
+    const first = e.text.trimStart().startsWith('<task-notification>')
+      ? /<summary>([^<]*)<\/summary>/.exec(e.text)?.[1]?.trim() || 'Background task finished'
+      : (e.text.split('\n').find(line => line.trim() !== '') ?? '')
     await update($, recording, () => ({ turnId: e.turnId, turn, prompt: clean(first.trim()).slice(0, 200), keys: [] }))
     const repo = await read($, vcs)
     // Not awaited: a Plastic status takes seconds, so it runs while the model starts, and each tool call waits for it.

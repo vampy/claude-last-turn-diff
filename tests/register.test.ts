@@ -362,6 +362,18 @@ describe('recording', () => {
     expect(rows).toEqual(['a.txt  +1 −1', 'b.txt  +1 −1'])
   })
 
+  test("a turn a background task's notification starts shows its summary, not the tag", async ($, on) => {
+    world(on, {})
+    const notice = (summary: string) =>
+      `<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n${summary}</task-notification>\n`
+    await start($, 't1', notice('<summary>Background command "npm test" completed (exit code 0)</summary>\n'))
+    await complete($, 't1')
+    expect((await pane($, 'terminal')).header).toBe('T1 · 0 files · +0 −0  Background command "npm test" completed (exit code 0)')
+    await start($, 't2', notice(''))
+    await complete($, 't2')
+    expect((await pane($, 'desktop')).header).toBe('T2 · 0 files · +0 −0  Background task finished')
+  })
+
   test('a turn without edits replaces the last one', async ($, on) => {
     world(on, { 'C:\\proj\\a.txt': 'a\n' })
     await start($, 't1')
