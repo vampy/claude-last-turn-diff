@@ -10,6 +10,12 @@
       "title": "Open the pane after each turn",
       "description": "Opens the Last turn pane when a turn ends with file changes.",
       "default": true
+    },
+    "shellEdits": {
+      "type": "boolean",
+      "title": "Show shell edits",
+      "description": "Also shows files changed by shell commands, scripts or builds, read from git or Plastic SCM status around each turn.",
+      "default": true
     }
   }
 }

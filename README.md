@@ -1,16 +1,17 @@
 # last-turn-diff
 
 A Claude Code mod that adds a Codex-style "Last turn" diff. After each turn, one pane shows every file
-Claude changed in that turn, as one net diff per file. It works in the Claude Desktop Code tab and in the
-terminal. It needs no version control and never calls one: the diffs come from Claude's own tool calls and
-file reads, so it works the same under any version control, or none.
+changed during that turn, as one net diff per file. It works in the Claude Desktop Code tab and in the
+terminal. Claude's `Edit`, `Write` and `NotebookEdit` calls are seen under any version control, or none.
+Inside a git repository or a Plastic SCM workspace, files changed by shell commands, scripts and builds
+show too: the mod reads the version control's status around each turn.
 
 - `/turn-diff` opens the pane, or closes it if it is open. It also replies with a one-line summary, which
   is all you get on mobile.
-- The pane header reads `T3 · 3 files · +12 −4`, with the prompt's first line under it. Below that is one row
-  per file (path, counts, and `new` / `deleted` / `CRLF→LF` / `too large` badges); pressing a row jumps to
-  that file. Each file's hunks follow in `diff` code blocks. A large turn is split into pages with
-  Prev/Next.
+- The pane header reads `T3 · 3 files · +12 −4`, with the prompt's first line under it, and a note when
+  shell changes could not be read. Below that is one row per file (path, counts, and `new` / `deleted` /
+  `CRLF→LF` / `binary` / `too large` badges); pressing a row jumps to that file. Each file's hunks follow
+  in `diff` code blocks. A large turn is split into pages with Prev/Next.
 - The band above the prompt reads `Last turn: 3 files +12 −4  [ View ]  [ x ]` after a turn with edits.
   View opens the pane; x hides the band until the next turn.
 
@@ -26,6 +27,32 @@ The main loop's `turn.complete` closes the turn (a subagent's carries `agentId` 
 turns count too. The mod reads every touched file again and diffs before against now in `hooks/diff.ts`:
 lines with a trailing `\r` stripped, the common prefix and suffix trimmed, an LCS over the middle, and
 unified hunks with 3 lines of context. Only the finished last turn is kept.
+
+### Shell edits
+
+At session start (and after each reload) the mod asks `git rev-parse --show-toplevel` and
+`cm gwp <cwd> --format={1}` where the session runs; when both answer, the root nearest the cwd wins. It
+never looks for a `.git` folder: an empty one makes git fail.
+
+At turn start it reads the status: `git status --porcelain=v1 -z --untracked-files=all --no-renames`, or
+`cm status --controlledchanged --changed --localdeleted --private --xml=<file>`. It records HEAD or the
+loaded changeset, and each listed file's content, as an `Edit` would (binary files and those past the caps
+by size and mtime alone). This runs alongside the model's first request rather than before it, and every
+tool call waits for it, so no tool runs before the snapshot. At turn end it reads the status again. A file
+listed now but not at turn start was clean then, so its before is the base revision:
+`git cat-file --filters <HEAD>:<path>`, which keeps the CRLF `core.autocrlf` writes, or
+`cm cat rev:<path>#cs:<changeset> --raw --file=<file>`, eight at a time. A file dirty at turn start diffs
+against its turn-start content and drops out if the turn didn't change it.
+
+- git: a commit during the turn still shows its files, from `git diff --name-status <old> <new>`. A HEAD
+  that moved any other way (a reset, a checkout) gets a note instead.
+- Plastic: `cm` output goes to files under `%TEMP%\claude-last-turn-diff`, since through a pipe `cm` turns
+  non-ASCII into `?`. Only `gwp`, `status` and `cat` run, never `cm diff`, which can open the GUI. When the
+  loaded changeset moves, or a `Bash` or `PowerShell` command in the turn (background ones included) runs
+  `cm update`, `switch` or `merge`, the turn-end status is skipped with a note: mid-switch it can list a
+  huge, misleading change set, and a status must not run beside an update.
+- A failed status (not logged in, a server error) means no shell files for that turn and a note, never
+  "no changes".
 
 ## Load it
 
@@ -49,14 +76,19 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
 - `autoOpen` (on by default): open the pane by itself when a turn ends with file changes. Like any pane
   opened unasked, it is shown only in a terminal at least 144 columns wide (110 once you have opened it
   yourself); below that it waits, and `/turn-diff` shows it.
+- `shellEdits` (on by default): also show files changed by shell commands, scripts and builds, read from
+  git or Plastic SCM status around each turn. Off, the mod runs no process at all and sees only `Edit`,
+  `Write` and `NotebookEdit` calls. Turn it off if a status is slow in your repository or workspace: in a
+  large Plastic workspace each `cm status` takes a few seconds (2.3 s on a big Unreal project), and each
+  base revision fetched from a cloud repository about a second.
 
-To turn it off in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
+To turn either off in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
 `~/.claude/settings.json` and start a new session. Project settings are not read for plugin options. The
 key `last-turn-diff@inline` works too; it is the one `claude plugin configure` writes.
 
 ```json
 "pluginConfigs": {
-  "last-turn-diff": { "options": { "autoOpen": false } }
+  "last-turn-diff": { "options": { "autoOpen": false, "shellEdits": false } }
 }
 ```
 
@@ -77,14 +109,31 @@ git; the engine rewrites it on every load).
 
 ## Known limits
 
-- Only `Edit`, `Write` and `NotebookEdit` calls are seen. Changes made by shell commands or scripts are
-  not.
+- Shell changes are seen only inside the git repository or Plastic workspace the session started in, and
+  not in files it ignores (`.gitignore`, Plastic's `ignore.conf`). Outside both, only `Edit`, `Write` and
+  `NotebookEdit` calls are seen.
+- Anything that changes a file during a turn counts as the turn's, your own editor included.
+- Snapshot caps: content is recorded for files dirty at turn start up to 16 MiB in all; past that (or past
+  2 MiB, or binary) a file is recorded by size and mtime and shows without hunks if those change. Past
+  1,000 dirty files the rest are left out. At turn end at most 1,000 newly listed files are shown, with a
+  note for the rest.
+- A hot reload while the turn-start status is still running loses shell changes for that turn.
+- A Plastic turn that runs `cm update`, `switch` or `merge`, or moves the loaded changeset (a check-in),
+  shows only Claude's own edits and the files dirty at turn start, with a note. One started in the
+  background in an earlier turn and still running at the next turn's start is not detected: that turn's
+  read-only `cm status` runs beside it.
+- Plastic moves made by a shell `mv` (not `cm mv`) show as a deleted file and a new one: the mod leaves
+  out `--localmoved`, a slow similarity search.
+- Gluon (partial) Plastic workspaces are neither handled nor tested.
+- A status slower than about 10 s at turn start can outlast the first tool call's hook budget; that tool
+  then runs before the snapshot ends.
 - Only the last turn is kept, in memory, and turns are numbered from when the mod loaded (slash commands
   don't count). Neither survives a restart or `--resume`: numbering starts again at T1.
 - A background subagent that edits after the main turn ended is not recorded, or lands in the next turn.
 - The before-content is read when the tool call starts, before any permission prompt. If you change the
   file yourself while the prompt is up, your change shows in the diff too.
-- Files are read as UTF-8 text: UTF-16 files diff as noise.
+- Files are read as UTF-8 text. A file holding a NUL byte shows as `binary`, with no hunks: UTF-16 files
+  do too.
 - Files over 2 MiB show as "too large to diff", with counts from the tools' `structuredPatch` where it has
   any.
 - Past 2M LCS cells, a file's changed middle shows as one delete block and one insert block. Each file
@@ -101,8 +150,6 @@ git; the engine rewrites it on every load).
 - **Turn picker**: choose T1…Tn in the pane, rebuilt from `$.session.messages()` so history survives
   `--resume`. Rebuilt turns can't flag line-ending changes, and only the newest 4,096 transcript
   entries are available.
-- **Shell edits**: catch files changed by commands and scripts, by snapshotting the version
-  control's status and file contents around each turn.
 - **Comments and undo**: send comments on hunks back to Claude; undo a whole turn.
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.

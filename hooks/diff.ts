@@ -219,15 +219,21 @@ export type FileInput = {
   /** From the tools' structuredPatch: the counts shown when the file is too large to diff. */
   added: number
   removed: number
+  /** Known binary without its content (Plastic's RevisionType, or a NUL seen at turn start). */
+  isBinary?: boolean
 }
 
-/** One file's net change over the turn, or null when there is none. */
+/** One file's net change over the turn, or null when there is none. A null before counts as changed. */
 export function diffFile(f: FileInput): FileDiff | null {
   const isDeleted = f.after === null
   if (f.isNew && isDeleted) return null
   const badges = f.isNew ? ['new'] : isDeleted ? ['deleted'] : []
   const before = f.before
   const after = f.after === null ? '' : f.after
+  if (f.isBinary === true || before?.includes('\0') || after?.includes('\0')) {
+    if (before === after && badges.length === 0) return null
+    return { path: f.path, added: f.added, removed: f.removed, badges: [...badges, 'binary'], notes: [], hunks: [] }
+  }
   if (before === null || after === undefined || before.length > MAX_SIZE || after.length > MAX_SIZE) {
     return {
       path: f.path,
