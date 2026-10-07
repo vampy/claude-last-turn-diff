@@ -91,3 +91,9 @@ git; the engine rewrites it on every load).
 - **Comments and undo**: send comments on hunks back to Claude; undo a whole turn.
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
+- **A user-facing README**: restructure this file like the READMEs of the
+  [claude-code-playground mods](https://github.com/anthropics/claude-code-playground/tree/main/claude-code/mods),
+  [claude-flightdeck](https://github.com/scasella/claude-flightdeck) and
+  [claude-statuspane](https://github.com/xuanji86/claude-statuspane). Install and usage instructions
+  first, then screenshots and a GIF or video of a real turn in the terminal and in Desktop, then what it
+  does, with the develop section last.
