@@ -3,5 +3,13 @@
   "version": "0.1.0",
   "description": "Shows every file Claude changed in the last turn as one diff pane (/turn-diff), with a summary band above the prompt.",
   "author": { "name": "Daniel Butum" },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "autoOpen": {
+      "type": "boolean",
+      "title": "Open the pane after each turn",
+      "description": "Opens the Last turn pane when a turn ends with file changes.",
+      "default": false
+    }
+  }
 }

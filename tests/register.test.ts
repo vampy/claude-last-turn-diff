@@ -336,6 +336,28 @@ describe('band and command', () => {
     expect(await $.command.run(RUN)).toMatchObject({ text: 'T2 · 1 file · +1 −1: a.txt' })
   })
 
+  test('the pane does not open by itself by default', async ($, on) => {
+    const { panes } = world(on, { 'C:\\proj\\a.txt': 'a\n' })
+    await start($, 't1')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't1')
+    expect([...panes]).toEqual([])
+  })
+
+  test('autoOpen opens the pane after a main turn with edits, not after one without', { options: { autoOpen: true } }, async ($, on) => {
+    const { panes } = world(on, { 'C:\\proj\\a.txt': 'a\n' })
+    await start($, 't1')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 'sub-1', 'agent-1')
+    expect([...panes]).toEqual([])
+    await complete($, 't1')
+    expect([...panes]).toEqual(['last-turn-diff'])
+    panes.clear()
+    await start($, 't2', 'Just a question')
+    await complete($, 't2')
+    expect([...panes]).toEqual([])
+  })
+
   test('/turn-diff says why when no surface shows the pane', async ($, on) => {
     world(on, {}, { unplaced: 'no attached surface places panes' })
     const said = { text: 'No turn has finished yet. (no pane shown: no attached surface places panes)' }

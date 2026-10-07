@@ -42,7 +42,7 @@ function describe(turn: LastTurn | null): string {
 /** The path cut from the left to fit `room` cells. */
 const fit = (path: string, room: number) => (path.length > room ? `…${path.slice(-(Math.max(room, 10) - 1))}` : path)
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'turn-diff', description: "Shows or hides the last turn's file changes" })
     return next(e)
@@ -111,6 +111,8 @@ export const register: Register = on => {
     await update($, lastTurn, () => ({ turn: open.turn, prompt: open.prompt, files }))
     await update($, isBandHidden, () => false)
     await update($, page, () => 0)
+    // An unasked open waits undrawn below 144 columns; /turn-diff shows it then.
+    if (options.autoOpen === true && files.length > 0) await $.ui.open({ id: PANE, title: TITLE })
     return next(e)
   })
 

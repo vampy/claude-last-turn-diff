@@ -44,6 +44,22 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
 "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"
 ```
 
+## Options
+
+- `autoOpen` (off by default): open the pane by itself when a turn ends with file changes. Like any pane
+  opened unasked, it is shown only in a terminal at least 144 columns wide (110 once you have opened it
+  yourself); below that it waits, and `/turn-diff` shows it.
+
+In a terminal, set it in `/config`. The Desktop Code tab has no `/config`: add this to
+`~/.claude/settings.json` and start a new session. Project settings are not read for plugin options. The
+key `last-turn-diff@inline` works too; it is the one `claude plugin configure` writes.
+
+```json
+"pluginConfigs": {
+  "last-turn-diff": { "options": { "autoOpen": true } }
+}
+```
+
 ## Develop
 
 From the mod's folder:
@@ -87,7 +103,6 @@ git; the engine rewrites it on every load).
   entries are available.
 - **Shell edits**: catch files changed by commands and scripts, by snapshotting the version
   control's status and file contents around each turn.
-- **Auto-open**: a `userConfig` option to open the pane when a turn ends.
 - **Comments and undo**: send comments on hunks back to Claude; undo a whole turn.
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
