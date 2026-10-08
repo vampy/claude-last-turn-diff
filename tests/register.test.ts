@@ -1896,6 +1896,59 @@ describe("Claude's own files", () => {
     expect((await pane($, 'terminal')).rows).toEqual(['a.txt  +1 −0  new'])
   })
 
+  test('showMemoryAndPlans: memory and plans show again, live and rebuilt; temporary files stay hidden', { options: { showMemoryAndPlans: true } }, async ($, on) => {
+    const home = 'C:\\Users\\me\\.claude'
+    world(on, { [at('b.txt')]: 'b\n' }, { env: { USERPROFILE: 'C:\\Users\\me' } })
+    await start($, 't1', 'Remember')
+    await save($, TEMP)
+    await save($, `${home}\\projects\\C--proj\\memory\\note.md`)
+    await save($, `${home}\\agent-memory\\reviewer\\MEMORY.md`)
+    await save($, `${home}\\plans\\plan.md`)
+    await complete($, 't1')
+    const rows = [
+      'C:/Users/me/.claude/projects/C--proj/memory/note.md  +1 −0  new',
+      'C:/Users/me/.claude/agent-memory/reviewer/MEMORY.md  +1 −0  new',
+      'C:/Users/me/.claude/plans/plan.md  +1 −0  new',
+    ]
+    expect((await pane($, 'terminal')).rows).toEqual(rows)
+    await start($, 't2', 'Next')
+    await edit($, 'b.txt', 'b', 'B')
+    await complete($, 't2')
+    const ui = await mountPane($, 'terminal')
+    expect((await picker(ui))?.labels).toEqual(['T1 · 3 files · Remember', 'T2 · 1 file · Next'])
+    await ui.select({ key: 'turn', value: '1' })
+    expect((await look(ui)).rows).toEqual(rows)
+  })
+
+  test('showMemoryAndPlans is in /config only while hideClaudeFiles is on', async ($, on) => {
+    world(on, {})
+    on('config.describe', ($, e) => ({ label: e.label, description: e.description, isHidden: e.isHidden }))
+    const row = (key: string) =>
+      $.config.describe({ key, label: 'Show', isHidden: false, provider: { plugin: 'last-turn-diff', tier: 'user' } })
+    expect((await row('last-turn-diff.showMemoryAndPlans')).isHidden).toBe(false)
+  })
+
+  test('hideClaudeFiles off: showMemoryAndPlans leaves /config, and every file shows', { options: { hideClaudeFiles: false, showMemoryAndPlans: false } }, async ($, on) => {
+    world(on, {}, { env: { USERPROFILE: 'C:\\Users\\me' } })
+    on('config.describe', ($, e) => ({ label: e.label, description: e.description, isHidden: e.isHidden }))
+    const row = (key: string) =>
+      $.config.describe({ key, label: 'Show', isHidden: false, provider: { plugin: 'last-turn-diff', tier: 'user' } })
+    for (const key of ['last-turn-diff.showMemoryAndPlans', 'last-turn-diff@inline.showMemoryAndPlans']) {
+      expect((await row(key)).isHidden).toBe(true)
+    }
+    // the other rows stay
+    expect((await row('last-turn-diff.hideClaudeFiles')).isHidden).toBe(false)
+    expect((await row('other-mod.showMemoryAndPlans')).isHidden).toBe(false)
+    await start($, 't1', 'Remember')
+    await save($, TEMP)
+    await save($, 'C:\\Users\\me\\.claude\\plans\\plan.md')
+    await complete($, 't1')
+    expect((await pane($, 'terminal')).rows).toEqual([
+      'C:/Users/me/AppData/Local/Temp/claude/C--proj/s1/scratchpad/msg.txt  +1 −0  new',
+      'C:/Users/me/.claude/plans/plan.md  +1 −0  new',
+    ])
+  })
+
   test('on Windows a folder spelled from / is not one: /tmp lands on the session\'s drive', async ($, on) => {
     // where the test kit, as the engine, takes /tmp on Windows
     world(on, {}, { links: { 'D:\\tmp': 'D:\\tmp' } })

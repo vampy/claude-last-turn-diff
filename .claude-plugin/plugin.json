@@ -29,6 +29,12 @@
       "description": "Leaves out Claude Code's own files: its temporary folder (scratchpads, pasted images), claude under CLAUDE_CODE_TMPDIR or else the system's temporary folder, and its memory and plans, projects, agent-memory and plans under CLAUDE_CONFIG_DIR or else ~/.claude. A session run inside one of those folders still sees its own files.",
       "default": true
     },
+    "showMemoryAndPlans": {
+      "type": "boolean",
+      "title": "Show Claude's memory and plan edits",
+      "description": "With hideClaudeFiles on, still shows Claude's edits to its memory and plans (projects, agent-memory and plans in its config folder); its temporary files stay hidden. Listed only while hideClaudeFiles is on.",
+      "default": false
+    },
     "svgDiffs": {
       "type": "boolean",
       "title": "Draw diffs as images on Desktop",

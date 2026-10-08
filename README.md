@@ -125,6 +125,8 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
   `/private/var`). On Windows a parent spelled from `/` (such as `/tmp`) is skipped: it would land on the session's
   drive. A turn that changed only such files counts as changing nothing. A session run inside one of those folders
   still sees the files under its own cwd.
+- `showMemoryAndPlans` (off by default): with `hideClaudeFiles` on, show Claude's memory and plan edits again; its
+  temporary files stay hidden. It is listed in `/config` only while `hideClaudeFiles` is on: off, nothing is hidden.
 - `svgDiffs` (on by default): in the Desktop Code tab, draw each file's hunks as SVG images. Desktop (app
   2.26454) draws a `Code` element's `format: 'diff'` as plain `diff` text, with no line numbers, line
   backgrounds or language colors, so the mod draws them itself. An image's text can't be selected, so each
@@ -132,14 +134,21 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
   clipboard. Off, Desktop shows the plain `diff` code blocks the terminal gets. Turn it off if the images
   ever draw wrong.
 
-To turn any of them off in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
-`~/.claude/settings.json` and start a new session. Project settings are not read for plugin options. The
-key `last-turn-diff@inline` works too; it is the one `claude plugin configure` writes.
+To change any of them in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
+`~/.claude/settings.json`, keeping only the options you change, and start a new session. Project settings
+are not read for plugin options. The key `last-turn-diff@inline` works too; it is the one
+`claude plugin configure` writes.
 
 ```json
 "pluginConfigs": {
   "last-turn-diff": {
-    "options": { "autoOpen": false, "shellEdits": false, "turnHistory": false, "hideClaudeFiles": false, "svgDiffs": false }
+    "options": {
+      "autoOpen": false,
+      "shellEdits": false,
+      "turnHistory": false,
+      "showMemoryAndPlans": true,
+      "svgDiffs": false
+    }
   }
 }
 ```

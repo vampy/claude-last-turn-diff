@@ -139,20 +139,24 @@ async function scratch($: EngineInterface): Promise<string> {
   return join(tmp, `claude-last-turn-diff/${(await $.session.id()).slice(0, 2)}`)
 }
 
+/** Which of Claude Code's own files are left out: none, its temporary ones, or its memory and plans too. */
+type Hidden = 'none' | 'temp' | 'all'
+
 /**
- * Where Claude Code keeps its own files, as keys ending in `/`: its temporary folder (scratchpads, pasted images),
- * `claude` under `$CLAUDE_CODE_TMPDIR` or else the system's; and its memory and plans, `projects`, `agent-memory` and
- * `plans` in its config folder, `$CLAUDE_CONFIG_DIR` or else `.claude` in the home folder. Each folder the environment
- * names, as the CLI picks one by platform, under the parent as spelled and where it lands: the CLI hands out the
- * temporary folder's real path (macOS: /var and /tmp under /private; a junction's target).
+ * Where Claude Code keeps the files `hidden` names, as keys ending in `/`: its temporary folder (scratchpads, pasted
+ * images), `claude` under `$CLAUDE_CODE_TMPDIR` or else the system's; and its memory and plans, `projects`,
+ * `agent-memory` and `plans` in its config folder, `$CLAUDE_CONFIG_DIR` or else `.claude` in the home folder. Each
+ * folder the environment names, as the CLI picks one by platform, under the parent as spelled and where it lands: the
+ * CLI hands out the temporary folder's real path (macOS: /var and /tmp under /private; a junction's target).
  */
-async function claudeOwn($: EngineInterface, cwd: string): Promise<string[]> {
+async function claudeOwn($: EngineInterface, cwd: string, hidden: Hidden): Promise<string[]> {
+  if (hidden === 'none') return []
   // the engine lists the variables a module reads: each name spelled out
   const tmp = (await $.env.get('CLAUDE_CODE_TMPDIR')) || undefined
   const tmps = tmp !== undefined ? [tmp] : [await $.env.get('TEMP'), await $.env.get('TMP'), await $.env.get('TMPDIR'), '/tmp']
   const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || undefined
   const homes = config !== undefined ? [] : [await $.env.get('HOME'), await $.env.get('USERPROFILE')]
-  const configs = config !== undefined ? [config] : homes.map(home => home && join(home, '.claude'))
+  const configs = hidden !== 'all' ? [] : config !== undefined ? [config] : homes.map(home => home && join(home, '.claude'))
   // on Windows a folder spelled from / lands on the session's drive, never where Claude Code keeps anything
   const isWindows = /^(?:[a-z]:|\\\\)/i.test(cwd)
   const places = [
@@ -320,11 +324,11 @@ const forget = (history: History) => {
 
 /**
  * Reads the transcript's turns into `history`, leaving out one still running or ending (read mid-turn after a reload or
- * a resume), and with `hides`, the calls on Claude Code's own files.
+ * a resume), and the calls on the Claude Code files `hidden` names.
  */
-async function load($: EngineInterface, history: History, hides: boolean): Promise<TranscriptTurn[]> {
+async function load($: EngineInterface, history: History, hidden: Hidden): Promise<TranscriptTurn[]> {
   const cwd = await $.session.cwd()
-  const roots = hides ? await claudeOwn($, cwd) : []
+  const roots = await claudeOwn($, cwd, hidden)
   const found = turnsOf(await $.session.messages().catch(() => [])).map(t => ({
     ...t,
     uses: t.uses.filter(use => !isClaudeOwn(roots, cwd, pathOf(use) ?? '')),
@@ -371,13 +375,13 @@ function resolve(listed: readonly Listed[], live: LastTurn | null, after: readon
 /**
  * The turn the pane shows and the picker's entries; a turn is rebuilt from a fresh read of the transcript. With turn
  * history off (`isListed` false) the transcript is never read: the last turn alone, numbered from when the mod loaded.
- * `hides` leaves Claude Code's own files out of what is read.
+ * `hidden` names the Claude Code files left out of what is read.
  */
 async function shown(
   $: EngineInterface,
   history: History,
   isListed: boolean,
-  hides: boolean,
+  hidden: Hidden,
 ): Promise<{ turn: Shown | null; entries: Listed[] }> {
   if (!isListed) return { turn: await read($, lastTurn), entries: [] }
   const id = await $.session.id()
@@ -388,14 +392,14 @@ async function shown(
     history.id = id
     forget(history)
   }
-  let found = history.turns === undefined ? await load($, history, hides) : undefined
+  let found = history.turns === undefined ? await load($, history, hidden) : undefined
   const live = await read($, lastTurn)
   const after = await read($, later)
   const pick = await read($, picked)
   let view = resolve(history.turns ?? [], live, after, pick)
   if (view.want !== undefined && view.want !== view.number && history.rebuilt?.turn !== view.want) {
     if (found === undefined) {
-      found = await load($, history, hides)
+      found = await load($, history, hidden)
       view = resolve(history.turns ?? [], live, after, pick)
     }
     const turn = found.find(t => t.turn === view.want && t.turn !== view.number)
@@ -438,14 +442,26 @@ export const register: Register = (on, options) => {
   /** The turn-start snapshot in flight; module-local, so a reload drops it and the turn goes on without one. */
   let snapshotting: Promise<unknown> = Promise.resolve()
   const history: History = {}
+  /** showMemoryAndPlans takes memory and plans back out of what hideClaudeFiles hides. */
+  const hidden: Hidden = options.hideClaudeFiles === false ? 'none' : options.showMemoryAndPlans === true ? 'temp' : 'all'
 
   // Also after a hot reload. With shellEdits off nothing runs, and a version control found before is dropped.
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'turn-diff', description: "Shows or hides the last turn's file changes" })
+    // a change of option reloads the mod: the /config row below may come or go
+    $.ui.invalidate('config.describe')
     const found = options.shellEdits === false ? null : await detect($, e.cwd)
     await update($, vcs, () => found)
     return next(e)
   })
+
+  // With hideClaudeFiles off nothing is hidden, so there is nothing to show again: the row leaves the menu. Its key is
+  // `<plugin>.<field>`, the plugin named as installed or as loaded from a folder (`@inline`)
+  on('config.describe', ($, e, next) =>
+    next(
+      options.hideClaudeFiles === false && /^last-turn-diff(?:@[^.]*)?\.showMemoryAndPlans$/.test(e.key) ? { ...e, isHidden: true } : e,
+    ),
+  )
 
   // A /clear or a resume goes on with another conversation, under another id, and raises no session.start.
   on('session.end', async ($, e, next) => {
@@ -476,7 +492,7 @@ export const register: Register = (on, options) => {
     await update($, page, () => 0)
     const opened = await $.ui.open({ id: PANE, title: TITLE })
     const unplaced = opened.isPlaced ? '' : ` (no pane shown: ${opened.reason})`
-    return { text: describe((await shown($, history, options.turnHistory !== false, options.hideClaudeFiles !== false)).turn) + unplaced }
+    return { text: describe((await shown($, history, options.turnHistory !== false, hidden)).turn) + unplaced }
   })
 
   // Only the main loop raises turn.start; a subagent's run and a local slash command do not.
@@ -564,7 +580,7 @@ export const register: Register = (on, options) => {
     if (repo !== null && open.base !== undefined) {
       for (const [id, file] of await shellFiles($, repo, open, touched, notes)) touched.set(id, file)
     }
-    const roots = options.hideClaudeFiles === false || touched.size === 0 ? [] : await claudeOwn($, cwd)
+    const roots = touched.size === 0 ? [] : await claudeOwn($, cwd, hidden)
     const files: FileDiff[] = []
     for (const held of touched.values()) {
       // a scratchpad file, a commit message Claude wrote down: not the turn's work
@@ -600,7 +616,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface === 'mobile') return next(e)
     const { Box, Button, Code, Select, Text } = $.ui.resolve(e)
-    const { turn, entries } = await shown($, history, options.turnHistory !== false, options.hideClaudeFiles !== false)
+    const { turn, entries } = await shown($, history, options.turnHistory !== false, hidden)
     if (turn === null) return <Text dimColor>{NO_TURN}</Text>
     const picker = entries.length > 1 && (
       <Select
