@@ -167,7 +167,6 @@ git; the engine rewrites it on every load).
 - **Turn picker**: choose T1…Tn in the pane, rebuilt from `$.session.messages()` so history survives
   `--resume`. Rebuilt turns can't flag line-ending changes, and only the newest 4,096 transcript
   entries are available.
-- **Comments and undo**: send comments on hunks back to Claude; undo a whole turn.
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
 - **A user-facing README**: restructure this file like the READMEs of the
