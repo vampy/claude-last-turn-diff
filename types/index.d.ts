@@ -20,7 +20,9 @@ export type FileDiff = {
   hunks: Hunk[]
 }
 
+/** The last main turn to finish, recorded live. */
 export type LastTurn = {
+  /** Its number among the main turns since the mod loaded, shown with turnHistory off; on, the transcript numbers it. */
   turn: number
   /** The prompt's first line. */
   prompt: string
@@ -28,6 +30,9 @@ export type LastTurn = {
   /** Why shell changes are missing or partial; absent before shell-edit tracking. */
   notes?: string[]
 }
+
+/** A turn picked in the pane: its prompt, and its place from the newest turn (1), which only a new turn moves. */
+export type PickedTurn = { prompt: string; fromEnd: number }
 
 /** The version control the session's cwd is in, found at session start. */
 export type Vcs = {
@@ -87,6 +92,8 @@ declare module 'claude-code' {
       recording: Recording | null
       pending: StateFamily<PendingFile | null>
       lastTurn: LastTurn | null
+      /** The turn picked in the pane; null for the newest. */
+      picked: PickedTurn | null
       isBandHidden: boolean
       page: number
     }

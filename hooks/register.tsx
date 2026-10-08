@@ -1,8 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { FileDiff, Hunk, LastTurn, PendingFile, Recording, Vcs } from '../types'
+import type { FileDiff, Hunk, LastTurn, PendingFile, PickedTurn, Recording, Vcs } from '../types'
 import { blocks, clean, diffFile, fileKey, MAX_SIZE, paginate, relativePath, textSize } from './diff'
+import { editsOf, promptLine, rebuildFiles, turnsOf } from './history'
+import type { TranscriptTurn } from './history'
 import type { Entry, Status } from './vcs'
 import { drawHunks } from './svg'
 import type { Drawing } from './svg'
@@ -14,6 +16,8 @@ const TITLE = 'Last turn'
 const PAGE_BUDGET = 90_000
 /** Svg text per pane draw on desktop, which refuses a tree past 262,144 characters (the file rows count too). */
 const SVG_PAGE_BUDGET = 160_000
+/** Turns the picker lists, the newest: the engine refuses a Select of more than 64 options (and the whole pane with it). */
+const PICKS = 64
 /** Per hunk on desktop, its header row and Copy button: enough that a page of small hunks stays under 2,000 elements. */
 const HUNK_COST = 800
 /** Status files tracked per turn; past it they are left out of the diff. */
@@ -31,6 +35,7 @@ const recording = atom({ plugin: 'last-turn-diff', key: 'recording' } as const, 
 const lastTurn = atom({ plugin: 'last-turn-diff', key: 'lastTurn' } as const, null)
 const isBandHidden = atom({ plugin: 'last-turn-diff', key: 'isBandHidden' } as const, false)
 const page = atom({ plugin: 'last-turn-diff', key: 'page' } as const, 0)
+const picked = atom({ plugin: 'last-turn-diff', key: 'picked' } as const, null)
 const PENDING = { plugin: 'last-turn-diff', key: 'pending' } as const
 
 /** The file's text; null when it does not exist, undefined when too large or unreadable. */
@@ -233,19 +238,119 @@ async function shellFiles(
   return files.filter(file => file !== null)
 }
 
-const count = (files: readonly FileDiff[]) => `${files.length} file${files.length === 1 ? '' : 's'}`
+const count = (files: number) => `${files} file${files === 1 ? '' : 's'}`
 const totals = (files: readonly FileDiff[]) => ({
   added: files.reduce((sum, f) => sum + f.added, 0),
   removed: files.reduce((sum, f) => sum + f.removed, 0),
 })
 
-function describe(turn: LastTurn | null): string {
+function describe(turn: Shown | null): string {
   if (turn === null) return 'No turn has finished yet.'
   if (turn.files.length === 0) return `T${turn.turn}: the last turn changed no files.`
   const { added, removed } = totals(turn.files)
   const names = turn.files.slice(0, 10).map(f => f.path)
   if (turn.files.length > 10) names.push(`${turn.files.length - 10} more`)
-  return `T${turn.turn} · ${count(turn.files)} · +${added} −${removed}: ${names.join(', ')}`
+  return `T${turn.turn} · ${count(turn.files.length)} · +${added} −${removed}: ${names.join(', ')}`
+}
+
+/** A turn as the pane shows it, numbered: the live recording, or one rebuilt from the transcript. */
+type Shown = LastTurn & { isRebuilt?: true }
+/** One turn the picker lists: its number, its prompt and how many files its calls changed. */
+type Listed = { turn: number; prompt: string; files: number }
+/**
+ * The transcript's turns, read when first shown after a turn ends, a reload, a resume, a /clear or a /compact; the one
+ * last rebuilt; the shown turn's files drawn as SVG; the session id they were read under; the prompt of a turn whose
+ * end is being recorded, left out like a running one; and the id of a session a /clear or a resume ended.
+ */
+type History = {
+  id?: string
+  turns?: Listed[]
+  rebuilt?: Shown
+  drawn?: { key: string; files: Drawing[] }
+  ending?: string
+  ended?: string
+}
+
+/** Drops what was read of the transcript and drawn from it: its numbers may name other turns now. */
+const forget = (history: History) => {
+  history.turns = undefined
+  history.rebuilt = undefined
+  history.drawn = undefined
+}
+
+/** Reads the transcript's turns into `history`, leaving out one still running or ending (read mid-turn after a reload or a resume). */
+async function load($: EngineInterface, history: History): Promise<TranscriptTurn[]> {
+  const found = turnsOf(await $.session.messages().catch(() => []))
+  const open = (await read($, recording))?.prompt ?? history.ending
+  if (open !== undefined && found[found.length - 1]?.prompt === open) found.pop()
+  forget(history)
+  history.turns = found.map(({ turn, prompt, uses }) => ({ turn, prompt, files: editsOf(uses).size }))
+  return found
+}
+
+/**
+ * The picker's entries, the live recording's number among them, and the number to show: the pick, else the newest.
+ * A pick is found by its place from the newest turn, which only a new turn moves (and a new turn drops the pick):
+ * the numbers shift as the oldest turns leave the 4,096-entry window or a compaction. Its prompt confirms it, or finds
+ * the one with that prompt nearest that place. The live recording is the transcript's last turn when it has that
+ * prompt, else the one after it (a continuation has no row).
+ */
+function resolve(listed: readonly Listed[], live: LastTurn | null, pick: PickedTurn | null) {
+  const last = listed[listed.length - 1]
+  const number = live === null ? undefined : last !== undefined && last.prompt === live.prompt ? last.turn : (last?.turn ?? 0) + 1
+  const entries = [
+    ...listed.filter(t => t.turn !== number),
+    ...(live === null ? [] : [{ turn: number!, prompt: live.prompt, files: live.files.length }]),
+  ].sort((a, b) => a.turn - b.turn)
+  const at = entries.length - (pick?.fromEnd ?? 0)
+  const near = entries
+    .map((t, i) => ({ t, far: Math.abs(i - at) }))
+    .filter(({ t }) => t.prompt === pick?.prompt)
+    .sort((a, b) => a.far - b.far)
+  return { entries, number, want: (near[0]?.t ?? entries[entries.length - 1])?.turn }
+}
+
+/**
+ * The turn the pane shows and the picker's entries; a turn is rebuilt from a fresh read of the transcript. With turn
+ * history off (`isListed` false) the transcript is never read: the last turn alone, numbered from when the mod loaded.
+ */
+async function shown($: EngineInterface, history: History, isListed: boolean): Promise<{ turn: Shown | null; entries: Listed[] }> {
+  if (!isListed) return { turn: await read($, lastTurn), entries: [] }
+  const id = await $.session.id()
+  // drawn after a /clear or a resume ended it, before the next conversation is in place: nothing of it
+  if (id === history.ended) return { turn: null, entries: [] }
+  // a /clear or a resume goes on under another id, with another transcript
+  if (history.id !== id) {
+    history.id = id
+    forget(history)
+  }
+  let found = history.turns === undefined ? await load($, history) : undefined
+  const live = await read($, lastTurn)
+  const pick = await read($, picked)
+  let view = resolve(history.turns ?? [], live, pick)
+  if (view.want !== undefined && view.want !== view.number && history.rebuilt?.turn !== view.want) {
+    if (found === undefined) {
+      found = await load($, history)
+      view = resolve(history.turns ?? [], live, pick)
+    }
+    const turn = found.find(t => t.turn === view.want && t.turn !== view.number)
+    if (turn !== undefined) {
+      const files = rebuildFiles(turn.uses, await $.session.cwd())
+      history.rebuilt = { turn: turn.turn, prompt: turn.prompt, files, isRebuilt: true }
+    }
+  }
+  const turn =
+    view.want === undefined ? null
+    : view.want === view.number ? { ...live!, turn: view.want }
+    : history.rebuilt?.turn === view.want ? history.rebuilt
+    : null
+  return { turn, entries: view.entries }
+}
+
+/** The text cut to 60 code points, so no emoji is cut in half. */
+function short(text: string): string {
+  const points = [...text]
+  return points.length > 60 ? `${points.slice(0, 59).join('')}…` : text
 }
 
 /** diffFile's note for the changed lines past its cap. */
@@ -264,8 +369,7 @@ const fit = (path: string, room: number) => (path.length > room ? `…${path.sli
 export const register: Register = (on, options) => {
   /** The turn-start snapshot in flight; module-local, so a reload drops it and the turn goes on without one. */
   let snapshotting: Promise<unknown> = Promise.resolve()
-  /** The last turn's files drawn as SVG, by the turn and the pane's width: turning a page draws nothing again. */
-  let drawn: { key: string; files: Drawing[] } | undefined
+  const history: History = {}
 
   // Also after a hot reload. With shellEdits off nothing runs, and a version control found before is dropped.
   on('session.start', async ($, e, next) => {
@@ -275,26 +379,44 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A /clear or a resume goes on with another conversation, under another id, and raises no session.start.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear' || e.reason === 'resume') {
+      history.ended = e.sessionId
+      await update($, lastTurn, () => null)
+      await update($, picked, () => null)
+      await update($, page, () => 0)
+    }
+    return next(e)
+  })
+
+  // A compaction leaves only its summary and the messages it kept: the turns before it are gone.
+  on('session.compact', async ($, e, next) => {
+    const compacted = await next(e)
+    if (e.agentId === undefined) forget(history)
+    return compacted
+  })
+
   on('command.run', { command: 'turn-diff' }, async $ => {
     // close only what is on screen: an open pane left unplaced, or behind another tab, opens again
     if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)) {
       await $.ui.close({ id: PANE })
       return { text: 'Closed the last-turn diff.' }
     }
+    await update($, picked, () => null)
+    await update($, page, () => 0)
     const opened = await $.ui.open({ id: PANE, title: TITLE })
     const unplaced = opened.isPlaced ? '' : ` (no pane shown: ${opened.reason})`
-    return { text: describe(await read($, lastTurn)) + unplaced }
+    return { text: describe((await shown($, history, options.turnHistory !== false)).turn) + unplaced }
   })
 
-  // Only the main loop raises turn.start; a subagent's run and a slash command do not.
-  // ($.session.turns() counts a command's rows as turns, so the mod counts its own.)
+  // Only the main loop raises turn.start; a subagent's run and a local slash command do not.
+  // ($.session.turns() counts a command's rows as turns, so the mod counts its own: the numbers with turnHistory off.)
   on('turn.start', async ($, e, next) => {
+    // a turn runs under the session's id: it is live, even had a session.end named it (a resume that failed)
+    history.ended = undefined
     const turn = await update($, turns, n => n + 1)
-    // a turn a finished background task starts carries its notification, not a prompt: show its summary
-    const first = e.text.trimStart().startsWith('<task-notification>')
-      ? /<summary>([^<]*)<\/summary>/.exec(e.text)?.[1]?.trim() || 'Background task finished'
-      : (e.text.split('\n').find(line => line.trim() !== '') ?? '')
-    await update($, recording, () => ({ turnId: e.turnId, turn, prompt: clean(first.trim()).slice(0, 200), keys: [] }))
+    await update($, recording, () => ({ turnId: e.turnId, turn, prompt: promptLine(e.text), keys: [] }))
     const repo = await read($, vcs)
     // Not awaited: a Plastic status takes seconds, so it runs while the model starts, and each tool call waits for it.
     if (repo !== null) snapshotting = snapshotStart($, repo, e.turnId).catch(() => undefined)
@@ -352,7 +474,13 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     await snapshotting
     const open = await read($, recording)
-    if (open === null) return next(e)
+    if (open === null) {
+      // a turn started before the mod loaded: the transcript holds one more turn
+      forget(history)
+      return next(e)
+    }
+    // until `lastTurn` holds it, a read of the transcript leaves this turn out as a running one
+    history.ending = open.prompt
     await update($, recording, () => null)
     const cwd = await $.session.cwd()
     const notes = [...(open.notes ?? [])]
@@ -375,9 +503,13 @@ export const register: Register = (on, options) => {
       const file = diffFile({ ...held, path: clean(relativePath(cwd, held.path)), after })
       if (file !== null) files.push(file)
     }
+    // the transcript holds one more turn: read it again when next shown
+    forget(history)
     await update($, lastTurn, () => ({ turn: open.turn, prompt: open.prompt, files, notes }))
+    history.ending = undefined
     await update($, isBandHidden, () => false)
     await update($, page, () => 0)
+    await update($, picked, () => null)
     // An unasked open waits undrawn below 144 columns; /turn-diff shows it then.
     if (options.autoOpen === true && files.length > 0) await $.ui.open({ id: PANE, title: TITLE })
     return next(e)
@@ -385,9 +517,25 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface === 'mobile') return next(e)
-    const { Box, Button, Code, Text } = $.ui.resolve(e)
-    const turn = await read($, lastTurn)
+    const { Box, Button, Code, Select, Text } = $.ui.resolve(e)
+    const { turn, entries } = await shown($, history, options.turnHistory !== false)
     if (turn === null) return <Text dimColor>No turn has finished yet.</Text>
+    const picker = entries.length > 1 && (
+      <Select
+        key="turn"
+        label="Turn"
+        options={entries.slice(-PICKS).map(t => ({
+          value: String(t.turn),
+          label: [`T${t.turn}`, count(t.files), ...(t.prompt === '' ? [] : [short(t.prompt)])].join(' · '),
+        }))}
+        value={String(turn.turn)}
+        onSelect={async value => {
+          const i = entries.findIndex(t => String(t.turn) === value)
+          await update($, picked, () => (i < 0 ? null : { prompt: entries[i]!.prompt, fromEnd: entries.length - i }))
+          await update($, page, () => 0)
+        }}
+      />
+    )
     const width = e.props.bodyColumns
     const rule = (
       <Text dimColor wrap="truncate">
@@ -407,13 +555,16 @@ export const register: Register = (on, options) => {
     const header = (
       <Box key="header" flexDirection="column">
         <Text bold>
-          T{turn.turn} · {count(turn.files)} · <Text color="success">+{all.added}</Text>{' '}
+          T{turn.turn} · {count(turn.files.length)} · <Text color="success">+{all.added}</Text>{' '}
           <Text color="error">−{all.removed}</Text>
         </Text>
         {turn.prompt !== '' && (
           <Text dimColor wrap="truncate-end">
             {turn.prompt}
           </Text>
+        )}
+        {turn.isRebuilt === true && (
+          <Text dimColor>Rebuilt from the transcript: Edit, Write and NotebookEdit calls only; line endings not compared.</Text>
         )}
         {(turn.notes ?? []).map(note => (
           <Text color="warning">{note}</Text>
@@ -423,19 +574,22 @@ export const register: Register = (on, options) => {
     if (turn.files.length === 0) {
       return (
         <Box flexDirection="column" width={width}>
+          {picker}
           {header}
-          <Text dimColor>The last turn changed no files.</Text>
+          <Text dimColor>This turn changed no files.</Text>
         </Box>
       )
     }
     // Desktop draws a `Code` diff as plain diff text: there each file's hunks are SVG images, unless turned off
     const Svg = e.surface === 'desktop' && options.svgDiffs !== false ? $.ui.resolve(e).Svg : undefined
-    // ponytail: a turn is known by its number, prompt and per-file counts; a content hash if two ever collide
+    // drawn by the turn and the pane's width, so turning a page draws nothing again; dropped with what was read of the
+    // transcript, whose numbers it holds. ponytail: a turn is known by its number, prompt and per-file counts; a content
+    // hash if two ever collide
     const key = [width, turn.turn, turn.prompt, ...turn.files.map(f => `${f.path} ${f.added} ${f.removed}`)].join('\n')
-    if (Svg !== undefined && drawn?.key !== key) {
-      drawn = { key, files: turn.files.map(file => drawHunks(file.path, file.hunks, width)) }
+    if (Svg !== undefined && history.drawn?.key !== key) {
+      history.drawn = { key, files: turn.files.map(file => drawHunks(file.path, file.hunks, width)) }
     }
-    const svgs = Svg === undefined ? undefined : drawn!.files
+    const svgs = Svg === undefined ? undefined : history.drawn!.files
     const pages = paginate(
       turn.files.map((file, i) =>
         svgs === undefined
@@ -453,6 +607,7 @@ export const register: Register = (on, options) => {
     }
     return (
       <Box flexDirection="column" width={width}>
+        {picker}
         {header}
         <Box flexDirection="column" marginTop={1}>
           {turn.files.map((file, i) => {
@@ -522,10 +677,18 @@ export const register: Register = (on, options) => {
     return (
       <Box gap={1}>
         <Text>
-          Last turn: {count(turn.files)} <Text color="success">+{all.added}</Text>{' '}
+          Last turn: {count(turn.files.length)} <Text color="success">+{all.added}</Text>{' '}
           <Text color="error">−{all.removed}</Text>
         </Text>
-        <Button key="view" label="View" onPress={() => $.ui.open({ id: PANE, title: TITLE })} />
+        <Button
+          key="view"
+          label="View"
+          onPress={async () => {
+            await update($, picked, () => null)
+            await update($, page, () => 0)
+            await $.ui.open({ id: PANE, title: TITLE })
+          }}
+        />
         <Button key="hide" label="x" role="dismiss" onPress={() => update($, isBandHidden, () => true)} />
       </Box>
     )

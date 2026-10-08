@@ -8,12 +8,16 @@ show too: the mod reads the version control's status around each turn.
 
 - `/turn-diff` opens the pane, or closes it if it is open. It also replies with a one-line summary, which
   is all you get on mobile.
-- The pane header reads `T3 · 3 files · +12 −4`, with the prompt's first line under it, and a note when
-  shell changes could not be read. Below that is one row per file (path, counts, and `new` / `deleted` /
+- The pane header reads `T3 · 3 files · +12 −4`, with the prompt's first line under it, a note when
+  shell changes could not be read, and a line saying so when the turn was rebuilt from the transcript. Below that is one row per file (path, counts, and `new` / `deleted` /
   `CRLF→LF` / `binary` / `too large` badges); pressing a row jumps to that file. Each file's hunks follow:
   in the terminal as `diff` code blocks; in the Desktop Code tab as images with red and green lines, line
   numbers and syntax colors, each under its `@@` line and a Copy button (see `svgDiffs`). A large turn is
   split into pages with Prev/Next.
+- A **Turn** picker at the top of the pane lists T1…Tn, the newest 64 turns the transcript holds, each with its prompt
+  and the number of files it edited. It shows the last turn by default; pick an older one to see its changes, rebuilt from
+  the transcript. The history survives `--resume` and `--continue`. `/turn-diff` and View go back to the last turn.
+  `turnHistory` turns it off.
 - The band above the prompt reads `Last turn: 3 files +12 −4  [ View ]  [ x ]` after a turn with edits.
   View opens the pane; x hides the band until the next turn.
 
@@ -28,7 +32,24 @@ before-contents live in `$.state`, so a hot reload mid-turn loses nothing.
 The main loop's `turn.complete` closes the turn (a subagent's carries `agentId` and is ignored); interrupted
 turns count too. The mod reads every touched file again and diffs before against now in `hooks/diff.ts`:
 lines with a trailing `\r` stripped, the common prefix and suffix trimmed, an LCS over the middle, and
-unified hunks with 3 lines of context. Only the finished last turn is kept.
+unified hunks with 3 lines of context. Only the finished last turn is recorded; older ones are rebuilt when picked.
+
+### Turn picker
+
+The turns come from `$.session.messages()`. The mod reads it when the pane is first drawn after a turn ends, a
+reload, a resume, a `/clear` (it goes on under another session id) or a `/compact`, and again to rebuild a picked
+turn. Each user row opens a turn unless it holds tool results or is one of these, which start no model turn: a local
+slash command (`<command-name>` first) or its output, a `!` command or its output, an interruption, or a compaction
+summary. A skill's command (`<command-message>` first) does open one and shows as `/name args`. Turns are numbered
+by their place in the transcript, so slash and `!` commands don't count. The live recording takes the number of the
+transcript's last turn when that turn has its prompt, or the next one (a continuation has no row). A pick is kept as
+its prompt and its place counted from the newest turn, so it stays on its turn when old turns drop out and the
+numbers shift; a new turn goes back to the newest. The picker lists the newest 64 turns.
+
+The last turn this session finished shows its live recording. Any other turn is rebuilt when shown (after a resume,
+the newest one too), from its `Edit`, `Write` and `NotebookEdit` calls that ran. The first call's
+`originalFile` (or `original_file`) is diffed against the text the calls leave, both with LF endings. When the
+transcript has no copy of the file, the calls' own `structuredPatch`es show one after another.
 
 ### Shell edits
 
@@ -83,6 +104,10 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
   `Write` and `NotebookEdit` calls. Turn it off if a status is slow in your repository or workspace: in a
   large Plastic workspace each `cm status` takes a few seconds (2.3 s on a big Unreal project), and each
   base revision fetched from a cloud repository about a second.
+- `turnHistory` (on by default): list the conversation's turns in the pane, so an earlier one can be picked and its
+  changes rebuilt from the transcript. Off, the mod never reads the transcript: the pane shows only the last turn the
+  mod recorded, numbered from when it loaded (slash commands don't count), and after a restart or `--resume` nothing
+  until a turn ends. Turn it off if reading the transcript after each turn is slow in a long session.
 - `svgDiffs` (on by default): in the Desktop Code tab, draw each file's hunks as SVG images. Desktop (app
   2.26454) draws a `Code` element's `format: 'diff'` as plain `diff` text, with no line numbers, line
   backgrounds or language colors, so the mod draws them itself. An image's text can't be selected, so each
@@ -96,7 +121,7 @@ key `last-turn-diff@inline` works too; it is the one `claude plugin configure` w
 
 ```json
 "pluginConfigs": {
-  "last-turn-diff": { "options": { "autoOpen": false, "shellEdits": false, "svgDiffs": false } }
+  "last-turn-diff": { "options": { "autoOpen": false, "shellEdits": false, "turnHistory": false, "svgDiffs": false } }
 }
 ```
 
@@ -135,8 +160,22 @@ git; the engine rewrites it on every load).
 - Gluon (partial) Plastic workspaces are neither handled nor tested.
 - A status slower than about 10 s at turn start can outlast the first tool call's hook budget; that tool
   then runs before the snapshot ends.
-- Only the last turn is kept, in memory, and turns are numbered from when the mod loaded (slash commands
-  don't count). Neither survives a restart or `--resume`: numbering starts again at T1.
+- Only the last turn is recorded live. Older turns are rebuilt from the transcript when picked, and show only
+  `Edit`, `Write` and `NotebookEdit` calls of the main conversation: no shell changes, no subagent edits, and no
+  line-ending changes (the tools hand back `originalFile` with LF). A turn that changed a file and changed it back
+  shows nothing, unless the transcript kept no copy of the file: then both calls' patches show.
+- The picker reads only the newest 4,096 transcript entries, and a compaction drops the turns before it. Turns
+  number from the oldest one left, so in a long session the numbers shift as old turns drop out. It lists only the
+  newest 64 turns, the most a `Select` takes. A `/clear` or a resume inside a session starts a new list and clears
+  the last turn.
+- An older turn's file count is the number of files its calls edited, so it can differ from the files its rebuilt
+  diff shows, for example when a turn edits a file back to how it was.
+- Claude Code doesn't keep every `Edit`'s and `Write`'s `originalFile`. A headless (`-p`) run strips them all; a
+  resumed transcript keeps them only for files under about 10 KB; and, as 2.1.292's code reads, a session strips the
+  bulk of all but about its newest 200 messages. Without it, a rebuilt file shows each call's own patch in turn, with
+  its own line numbers, so older turns usually show that way.
+- A turn with no prompt row in the transcript (a continuation, a message from another session) is recorded live
+  as the turn after the last one there. Once rebuilt, its calls count toward the turn before it.
 - A background subagent that edits after the main turn ended is not recorded, or lands in the next turn.
 - The before-content is read when the tool call starts, before any permission prompt. If you change the
   file yourself while the prompt is up, your change shows in the diff too.
@@ -164,9 +203,6 @@ git; the engine rewrites it on every load).
 
 ## Roadmap
 
-- **Turn picker**: choose T1…Tn in the pane, rebuilt from `$.session.messages()` so history survives
-  `--resume`. Rebuilt turns can't flag line-ending changes, and only the newest 4,096 transcript
-  entries are available.
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
 - **A user-facing README**: restructure this file like the READMEs of the

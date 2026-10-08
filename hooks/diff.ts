@@ -86,7 +86,7 @@ export function diffLines(a: readonly string[], b: readonly string[]): Op[] {
   return ops
 }
 
-const cut = (text: string) => (text.length > LINE_CAP ? `${text.slice(0, LINE_CAP)}…` : text)
+export const cut = (text: string) => (text.length > LINE_CAP ? `${text.slice(0, LINE_CAP)}…` : text)
 
 /** Groups a diff into unified hunks with CONTEXT lines around each run of changes. */
 export function toHunks(ops: readonly Op[]): Hunk[] {
@@ -270,14 +270,19 @@ export function diffFile(f: FileInput): FileDiff | null {
       notes.push('line endings changed')
     }
   }
+  return { path: f.path, added, removed, badges, notes, hunks: capHunks(toHunks(ops), notes) }
+}
+
+/** The hunks split to fit Code sources and kept up to FILE_CAP; the changed lines past it are counted in `notes`. */
+export function capHunks(all: readonly Hunk[], notes: string[]): Hunk[] {
   const hunks: Hunk[] = []
   let size = 0
   let hidden = 0
-  for (const h of toHunks(ops).flatMap(one => splitHunk(one))) {
+  for (const h of all.flatMap(one => splitHunk(one))) {
     size += hunkText(h).length + 1
     if (size <= FILE_CAP) hunks.push(h)
     else hidden += h.lines.filter(line => !line.startsWith(' ')).length
   }
   if (hidden > 0) notes.push(`${hidden} more changed lines not shown`)
-  return { path: f.path, added, removed, badges, notes, hunks }
+  return hunks
 }

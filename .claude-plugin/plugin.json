@@ -17,6 +17,12 @@
       "description": "Also shows files changed by shell commands, scripts or builds, read from git or Plastic SCM status around each turn.",
       "default": true
     },
+    "turnHistory": {
+      "type": "boolean",
+      "title": "Turn history",
+      "description": "Lists the conversation's turns in the pane, so an earlier one can be picked and its changes rebuilt from the transcript. Off, the pane shows only the last turn, numbered from when the mod loaded, and the transcript is never read.",
+      "default": true
+    },
     "svgDiffs": {
       "type": "boolean",
       "title": "Draw diffs as images on Desktop",
