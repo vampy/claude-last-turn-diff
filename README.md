@@ -14,12 +14,13 @@ show too: the mod reads the version control's status around each turn.
   in the terminal as `diff` code blocks; in the Desktop Code tab as images with red and green lines, line
   numbers and syntax colors, each under its `@@` line and a Copy button (see `svgDiffs`). A large turn is
   split into pages with Prev/Next.
-- A **Turn** picker at the top of the pane lists T1…Tn, the newest 64 turns the transcript holds, each with its prompt
-  and the number of files it edited. It shows the last turn by default; pick an older one to see its changes, rebuilt from
-  the transcript. The history survives `--resume` and `--continue`. `/turn-diff` and View go back to the last turn.
-  `turnHistory` turns it off.
+- A **Turn** picker at the top of the pane lists the turns that changed files, the newest 64 the transcript holds, each
+  with its prompt and the number of files it edited. It shows the last turn with changes by default; pick an older one
+  to see its changes, rebuilt from the transcript. A turn that changes nothing (a question, a background task's
+  notice) leaves the pane as it was, and is not listed. The history survives `--resume` and `--continue`. `/turn-diff` and View go back to
+  the last turn with changes. `turnHistory` turns it off.
 - The band above the prompt reads `Last turn: 3 files +12 −4  [ View ]  [ x ]` after a turn with edits.
-  View opens the pane; x hides the band until the next turn.
+  View opens the pane; x hides the band until the next turn with edits. A turn without edits hides it too.
 
 ## How it works
 
@@ -41,13 +42,17 @@ reload, a resume, a `/clear` (it goes on under another session id) or a `/compac
 turn. Each user row opens a turn unless it holds tool results or is one of these, which start no model turn: a local
 slash command (`<command-name>` first) or its output, a `!` command or its output, an interruption, or a compaction
 summary. A skill's command (`<command-message>` first) does open one and shows as `/name args`. Turns are numbered
-by their place in the transcript, so slash and `!` commands don't count. The live recording takes the number of the
-transcript's last turn when that turn has its prompt, or the next one (a continuation has no row). A pick is kept as
-its prompt and its place counted from the newest turn, so it stays on its turn when old turns drop out and the
-numbers shift; a new turn goes back to the newest. The picker lists the newest 64 turns.
+by their place in the transcript, so slash and `!` commands don't count. Listed are the turns whose calls edited a
+file, and the live recording. A turn that ends with no changes leaves the last one recorded on show, along with any
+pick and page, and is not listed even if its edits cancel out. One whose shell changes could not be read and that ran
+a shell command is shown instead, with its note. The mod keeps the prompts of the turns that ended without changes
+since the live recording; each is the transcript's turn at its place with its prompt, or has no row (a continuation).
+The live recording takes the number of the turn before them when that turn has its prompt, or the next one. A pick is kept as its prompt and its place counted from the newest listed turn, so it stays
+on its turn when old turns drop out and the numbers shift; a new turn with changes goes back to the newest. The picker
+lists the newest 64 turns.
 
-The last turn this session finished shows its live recording. Any other turn is rebuilt when shown (after a resume,
-the newest one too), from its `Edit`, `Write` and `NotebookEdit` calls that ran. The first call's
+The last turn with changes this session finished shows its live recording. Any other turn is rebuilt when shown
+(after a resume, the newest one too), from its `Edit`, `Write` and `NotebookEdit` calls that ran. The first call's
 `originalFile` (or `original_file`) is diffed against the text the calls leave, both with LF endings. When the
 transcript has no copy of the file, the calls' own `structuredPatch`es show one after another.
 
@@ -105,8 +110,8 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
   large Plastic workspace each `cm status` takes a few seconds (2.3 s on a big Unreal project), and each
   base revision fetched from a cloud repository about a second.
 - `turnHistory` (on by default): list the conversation's turns in the pane, so an earlier one can be picked and its
-  changes rebuilt from the transcript. Off, the mod never reads the transcript: the pane shows only the last turn the
-  mod recorded, numbered from when it loaded (slash commands don't count), and after a restart or `--resume` nothing
+  changes rebuilt from the transcript. Off, the mod never reads the transcript: the pane shows only the last turn with
+  changes the mod recorded, numbered from when it loaded (slash commands don't count), and after a restart or `--resume` nothing
   until a turn ends. Turn it off if reading the transcript after each turn is slow in a long session.
 - `svgDiffs` (on by default): in the Desktop Code tab, draw each file's hunks as SVG images. Desktop (app
   2.26454) draws a `Code` element's `format: 'diff'` as plain `diff` text, with no line numbers, line
@@ -169,13 +174,16 @@ git; the engine rewrites it on every load).
   newest 64 turns, the most a `Select` takes. A `/clear` or a resume inside a session starts a new list and clears
   the last turn.
 - An older turn's file count is the number of files its calls edited, so it can differ from the files its rebuilt
-  diff shows, for example when a turn edits a file back to how it was.
+  diff shows, for example when a turn edits a file back to how it was. A turn that changed files only through shell
+  commands or subagents is listed while it is the last turn with changes, and drops out of the list after the next one.
 - Claude Code doesn't keep every `Edit`'s and `Write`'s `originalFile`. A headless (`-p`) run strips them all; a
   resumed transcript keeps them only for files under about 10 KB; and, as 2.1.292's code reads, a session strips the
   bulk of all but about its newest 200 messages. Without it, a rebuilt file shows each call's own patch in turn, with
   its own line numbers, so older turns usually show that way.
 - A turn with no prompt row in the transcript (a continuation, a message from another session) is recorded live
-  as the turn after the last one there. Once rebuilt, its calls count toward the turn before it.
+  as the turn after the one before it. Once rebuilt, its calls count toward the turn before it. A prompt with no text
+  (an image alone) can't be told from a continuation: a continuation without changes right after such prompts can
+  take one's place and give the turn shown the wrong number.
 - A background subagent that edits after the main turn ended is not recorded, or lands in the next turn.
 - The before-content is read when the tool call starts, before any permission prompt. If you change the
   file yourself while the prompt is up, your change shows in the diff too.

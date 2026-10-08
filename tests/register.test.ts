@@ -442,18 +442,20 @@ describe('recording', () => {
   })
 
   test("a turn a background task's notification starts shows its summary, not the tag", async ($, on) => {
-    world(on, {})
+    world(on, { 'C:\\proj\\a.txt': 'a\n' })
     const notice = (summary: string) =>
       `<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n${summary}</task-notification>\n`
     await start($, 't1', notice('<summary>Background command "npm test" completed (exit code 0)</summary>\n'))
+    await edit($, 'a.txt', 'a', 'A')
     await complete($, 't1')
-    expect((await pane($, 'terminal')).header).toBe('T1 · 0 files · +0 −0  Background command "npm test" completed (exit code 0)')
+    expect((await pane($, 'terminal')).header).toBe('T1 · 1 file · +1 −1  Background command "npm test" completed (exit code 0)')
     await start($, 't2', notice(''))
+    await edit($, 'a.txt', 'A', 'a')
     await complete($, 't2')
-    expect((await pane($, 'desktop')).header).toBe('T2 · 0 files · +0 −0  Background task finished')
+    expect((await pane($, 'desktop')).header).toBe('T2 · 1 file · +1 −1  Background task finished')
   })
 
-  test('a turn without edits replaces the last one', async ($, on) => {
+  test('a turn without edits leaves the last one on show', async ($, on) => {
     world(on, { 'C:\\proj\\a.txt': 'a\n' })
     await start($, 't1')
     await edit($, 'a.txt', 'a', 'A')
@@ -461,11 +463,38 @@ describe('recording', () => {
     await start($, 't2', 'Just a question')
     await complete($, 't2')
     for (const surface of SURFACES) {
+      const { header, rows } = await pane($, surface)
+      expect(header).toBe('T1 · 1 file · +1 −1  Fix the thing')
+      expect(rows).toEqual(['a.txt  +1 −1'])
+    }
+  })
+
+  test('a turn without edits that ran a shell command its note doubts is shown, the note on it', async ($, on) => {
+    world(on, { 'C:\\proj\\a.txt': 'a\n' }, { vcs: 'git', isStatusBroken: true, shell: { build: () => undefined } })
+    await begin($)
+    await start($, 't1')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't1')
+    await start($, 't2', 'Build it')
+    await bash($, 'build')
+    await complete($, 't2')
+    const note = 'git status failed at turn start: shell changes are not shown.'
+    for (const surface of SURFACES) {
       const { header, texts, codes } = await pane($, surface)
-      expect(header).toBe('T2 · 0 files · +0 −0  Just a question')
+      expect(header).toBe(`T2 · 0 files · +0 −0  Build it  ${note}`)
       expect(texts).toContain('This turn changed no files.')
       expect(codes).toEqual([])
     }
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'Closed the last-turn diff.' })
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'T2 changed no files.' })
+    // listed while it is the live one
+    const ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · Fix the thing', 'T2 · 0 files · Build it'], value: '2' })
+    await ui.unmount()
+    // the same note on a turn that ran no shell command leaves T2 on show
+    await start($, 't3', 'Just a question')
+    await complete($, 't3')
+    expect((await pane($, 'terminal')).header).toBe(`T2 · 0 files · +0 −0  Build it  ${note}`)
   })
 })
 
@@ -589,16 +618,28 @@ describe('band and command', () => {
     expect(await band.find({ key: 'view' })).toBeDefined()
   })
 
-  test('the band stays out of the way with no edits', async ($, on) => {
-    world(on, {})
+  test('the band stays out of the way with no edits, and goes after a turn without them', async ($, on) => {
+    world(on, { 'C:\\proj\\a.txt': 'a\n' })
     for (const surface of SURFACES) {
       const band = await $.ui.mount({ plugin: PLUGIN, surface, ...BAND })
       expect(await band.find({ key: 'engine' })).toBeDefined()
     }
+    const view = async () => {
+      const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', ...BAND })
+      const found = await band.find({ key: 'view' })
+      await band.unmount()
+      return found
+    }
     await start($, 't1')
     await complete($, 't1')
-    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'desktop', ...BAND })
-    expect(await band.find({ key: 'view' })).toBeUndefined()
+    expect(await view()).toBeUndefined()
+    await start($, 't2')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't2')
+    expect(await view()).toBeDefined()
+    await start($, 't3', 'Just a question')
+    await complete($, 't3')
+    expect(await view()).toBeUndefined()
   })
 
   test('/turn-diff toggles the pane and says what changed', { options: { autoOpen: false } }, async ($, on) => {
@@ -606,7 +647,7 @@ describe('band and command', () => {
     /** Runs /turn-diff, its row written to the transcript as a local command's is. */
     const turnDiff = () => (rows.push(command('turn-diff')), $.command.run(RUN))
     await $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true })
-    expect(await turnDiff()).toMatchObject({ text: 'No turn has finished yet.' })
+    expect(await turnDiff()).toMatchObject({ text: 'No finished turn has changed files yet.' })
     expect([...panes]).toEqual(['last-turn-diff'])
     expect(await turnDiff()).toMatchObject({ text: 'Closed the last-turn diff.' })
     expect([...panes]).toEqual([])
@@ -646,7 +687,7 @@ describe('band and command', () => {
 
   test('/turn-diff says why when no surface shows the pane', async ($, on) => {
     world(on, {}, { unplaced: 'no attached surface places panes' })
-    const said = { text: 'No turn has finished yet. (no pane shown: no attached surface places panes)' }
+    const said = { text: 'No finished turn has changed files yet. (no pane shown: no attached surface places panes)' }
     expect(await $.command.run(RUN)).toMatchObject(said)
     // the pane is open but not on screen: running it again says why again rather than closing it
     expect(await $.command.run(RUN)).toMatchObject(said)
@@ -697,9 +738,10 @@ for (const kind of ['git', 'cm'] as const) {
       await start($, 't2', 'Just look')
       await bash($, 'noop')
       await complete($, 't2')
+      // a turn with no changes leaves T1 on show
       const { header, rows } = await pane($, 'desktop')
-      expect(header).toBe('T2 · 0 files · +0 −0  Just look')
-      expect(rows).toEqual([])
+      expect(header).toBe('T1 · 1 file · +1 −1  Fix the thing')
+      expect(rows).toEqual(['a.txt  +1 −1'])
     })
 
     test('new files show new, deleted ones deleted', async ($, on) => {
@@ -882,7 +924,7 @@ async function picker(ui: Awaited<ReturnType<typeof mountPane>>) {
 }
 
 describe('turn picker', () => {
-  test('lists the transcript turns; a picked one is rebuilt, the newest is the live recording', async ($, on) => {
+  test('lists the transcript turns that changed files; a picked one is rebuilt, the last is the live recording', async ($, on) => {
     world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n' })
     await start($, 't1', 'First')
     await edit($, 'a.txt', 'a', 'A')
@@ -895,14 +937,10 @@ describe('turn picker', () => {
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
       expect(await picker(ui)).toEqual({
-        labels: [
-          'T1 · 1 file · First',
-          "T2 · 1 file · Second, with a prompt long enough to be cut in the picker's…",
-          'T3 · 0 files · Just a question',
-        ],
-        value: '3',
+        labels: ['T1 · 1 file · First', "T2 · 1 file · Second, with a prompt long enough to be cut in the picker's…"],
+        value: '2',
       })
-      expect((await look(ui)).texts).toContain('This turn changed no files.')
+      expect((await look(ui)).rows).toEqual(['b.txt  +1 −1'])
       await ui.select({ key: 'turn', value: '1' })
       const { header, rows, codes, svgs } = await look(ui)
       expect(header).toBe(`T1 · 1 file · +1 −1  First  ${REBUILT}`)
@@ -910,8 +948,8 @@ describe('turn picker', () => {
       if (surface === 'terminal') expect(codes).toEqual([{ path: 'a.txt', source: '@@ -1,1 +1,1 @@\n-a\n+A' }])
       else expect(svgs.map(svg => [svg.alt, svgRows(svg.source)])).toEqual([['Diff of a.txt, @@ -1,1 +1,1 @@', ['1 - a', '1 + A']]])
       expect((await picker(ui))?.value).toBe('1')
-      await ui.select({ key: 'turn', value: '3' })
-      expect((await look(ui)).header).toBe('T3 · 0 files · +0 −0  Just a question')
+      await ui.select({ key: 'turn', value: '2' })
+      expect((await look(ui)).header).toBe("T2 · 1 file · +1 −1  Second, with a prompt long enough to be cut in the picker's list")
       await ui.unmount()
     }
   })
@@ -923,6 +961,7 @@ describe('turn picker', () => {
     await complete($, 't1')
     expect((await pane($, 'terminal')).rows).toEqual(['a.txt  +1 −1  CRLF→LF'])
     await start($, 't2', 'Next')
+    await $.tool.call({ tool: 'Write', file_path: at('b.txt'), content: 'b\n' })
     await complete($, 't2')
     const ui = await mountPane($, 'terminal')
     await ui.select({ key: 'turn', value: '1' })
@@ -990,13 +1029,14 @@ describe('turn picker', () => {
   test("local slash commands open no turn; a skill's command does, shown as typed", async ($, on) => {
     const { rows } = world(on, { [at('a.txt')]: 'a\n' })
     await start($, 't1', 'First')
+    await edit($, 'a.txt', 'a', 'A')
     await complete($, 't1')
     rows.push(command('effort', 'high'), command('turn-diff'))
     await start($, 't2', skill('review', '42').text)
-    await edit($, 'a.txt', 'a', 'A')
+    await edit($, 'a.txt', 'A', 'a')
     await complete($, 't2')
     const ui = await mountPane($, 'desktop')
-    expect(await picker(ui)).toEqual({ labels: ['T1 · 0 files · First', 'T2 · 1 file · /review 42'], value: '2' })
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · First', 'T2 · 1 file · /review 42'], value: '2' })
     expect((await look(ui)).header).toBe('T2 · 1 file · +1 −1  /review 42')
   })
 
@@ -1047,13 +1087,14 @@ describe('turn picker', () => {
     await begin($)
     await start($, 't3', 'Running')
     await edit($, 'b.txt', 'b', 'B')
+    // Old two changed nothing: the newest turn with changes is shown, and the only one to pick
     let ui = await mountPane($, 'terminal')
-    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · Old one', 'T2 · 0 files · Old two'], value: '2' })
-    expect((await look(ui)).header).toBe(`T2 · 0 files · +0 −0  Old two  ${REBUILT}`)
+    expect(await picker(ui)).toBeUndefined()
+    expect((await look(ui)).header).toBe(`T1 · 1 file · +1 −1  Old one  ${REBUILT}`)
     await ui.unmount()
     await complete($, 't3')
     ui = await mountPane($, 'terminal')
-    expect((await picker(ui))?.labels).toEqual(['T1 · 1 file · Old one', 'T2 · 0 files · Old two', 'T3 · 1 file · Running'])
+    expect((await picker(ui))?.labels).toEqual(['T1 · 1 file · Old one', 'T3 · 1 file · Running'])
     expect((await look(ui)).header).toBe('T3 · 1 file · +1 −1  Running')
   })
 
@@ -1079,11 +1120,12 @@ describe('turn picker', () => {
       const drawn = await look(ui)
       expect(drawn.texts).toContain('Page 1 of 3')
       expect(drawn.rows).toEqual(['x.txt  +4000 −4000', 'y.txt  +4000 −4000', 'z.txt  +4000 −4000'])
-      // the pick is the session's, not the drawing's: back to the newest for the next surface
-      await ui.select({ key: 'turn', value: '2' })
+      // the pick is the session's, not the drawing's: back to the newest for the next surface, T1 left for the last
+      if (surface !== 'desktop') await ui.select({ key: 'turn', value: '2' })
       await ui.unmount()
     }
     await start($, 't3', 'Third')
+    await edit($, 'a.txt', 'A', 'a')
     await complete($, 't3')
     const ui = await mountPane($, 'terminal')
     expect((await picker(ui))?.value).toBe('3')
@@ -1137,9 +1179,14 @@ describe('turn picker', () => {
     expect(await picker(drawn)).toBeUndefined()
     expect((await look(drawn)).header).toBe('T1 · 1 file · +1 −1  Two')
     await drawn.unmount()
+    // a turn with no changes after it keeps its number
     await start($, 't3', 'Three')
     await complete($, 't3')
-    expect((await pane($, 'terminal')).header).toBe('T1 · 0 files · +0 −0  Three')
+    expect((await pane($, 'terminal')).header).toBe('T1 · 1 file · +1 −1  Two')
+    await start($, 't4', 'Four')
+    await edit($, 'a.txt', 'A', 'a')
+    await complete($, 't4')
+    expect((await pane($, 'terminal')).header).toBe('T2 · 1 file · +1 −1  Four')
   })
 
   test('a /clear or a resume starts another conversation: its turns alone, from the first page, no band', async ($, on) => {
@@ -1171,9 +1218,9 @@ describe('turn picker', () => {
     await end('clear', SESSION)
     expect(await band()).toBeUndefined()
     // drawn before the next conversation is in place: nothing of the one that ended
-    expect((await pane($, 'terminal')).texts).toEqual(['No turn has finished yet.'])
+    expect((await pane($, 'terminal')).texts).toEqual(['No finished turn has changed files yet.'])
     swap('cd34', [])
-    expect((await pane($, 'terminal')).texts).toEqual(['No turn has finished yet.'])
+    expect((await pane($, 'terminal')).texts).toEqual(['No finished turn has changed files yet.'])
     await end('resume', 'cd34')
     swap('ef56', [
       prompt('One'),
@@ -1216,20 +1263,21 @@ describe('turn picker', () => {
     await start($, 't3', 'Three')
     await complete($, 't3')
     expect(reads()).toBe(2)
-    expect(await $.command.run(RUN)).toMatchObject({ text: 'T3: the last turn changed no files.' })
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'T2 · 1 file · +1 −1: b.txt' })
     expect(reads()).toBe(3)
   })
 
   test('turns with the same prompt are told apart by number', async ($, on) => {
     world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n', [at('c.txt')]: 'c\n' })
-    for (const [turn, file] of [['t1', 'a'], ['t2', 'b'], ['t3', 'c']] as const) {
+    // T3 changes nothing: once T4 is recorded, it no longer counts
+    for (const [turn, file] of [['t1', 'a'], ['t2', 'b'], ['t3', ''], ['t4', 'c']] as const) {
       await start($, turn, 'go on')
-      await edit($, `${file}.txt`, file, file.toUpperCase())
+      if (file !== '') await edit($, `${file}.txt`, file, file.toUpperCase())
       await complete($, turn)
     }
     const ui = await mountPane($, 'terminal')
-    expect((await picker(ui))?.labels).toEqual(['T1 · 1 file · go on', 'T2 · 1 file · go on', 'T3 · 1 file · go on'])
-    for (const [value, row] of [['2', 'b.txt'], ['1', 'a.txt'], ['3', 'c.txt'], ['2', 'b.txt']] as const) {
+    expect((await picker(ui))?.labels).toEqual(['T1 · 1 file · go on', 'T2 · 1 file · go on', 'T4 · 1 file · go on'])
+    for (const [value, row] of [['2', 'b.txt'], ['1', 'a.txt'], ['4', 'c.txt'], ['2', 'b.txt']] as const) {
       await ui.select({ key: 'turn', value })
       expect([(await picker(ui))?.value, (await look(ui)).rows]).toEqual([value, [`${row}  +1 −1`]])
     }
@@ -1276,7 +1324,11 @@ describe('turn picker', () => {
   })
 
   test('the picker lists the newest 64 turns, all a Select takes; the pane still draws past them', async ($, on) => {
-    const transcript = Array.from({ length: 205 }, (_, i) => [prompt(`Question ${i + 1}`), reply()]).flat()
+    const transcript = Array.from({ length: 205 }, (_, i) => [
+      prompt(`Fix ${i + 1}`),
+      ...editRow(at(`f${i + 1}.txt`), 'a\n', 'a', 'A'),
+      reply(),
+    ]).flat()
     world(on, {}, { transcript })
     await begin($)
     for (const surface of SURFACES) {
@@ -1284,12 +1336,12 @@ describe('turn picker', () => {
       const found = await picker(ui)
       expect([found?.labels.length, found?.labels[0], found?.labels[63], found?.value]).toEqual([
         64,
-        'T142 · 0 files · Question 142',
-        'T205 · 0 files · Question 205',
+        'T142 · 1 file · Fix 142',
+        'T205 · 1 file · Fix 205',
         '205',
       ])
       await ui.select({ key: 'turn', value: '142' })
-      expect((await look(ui)).header).toBe(`T142 · 0 files · +0 −0  Question 142  ${REBUILT}`)
+      expect((await look(ui)).header).toBe(`T142 · 1 file · +1 −1  Fix 142  ${REBUILT}`)
       await ui.select({ key: 'turn', value: '205' })
       await ui.unmount()
     }
@@ -1301,6 +1353,7 @@ describe('turn picker', () => {
     await edit($, 'a.txt', 'a', 'A')
     await complete($, 't1')
     await start($, 't2', 'other')
+    await edit($, 'b.txt', 'b', 'B')
     await complete($, 't2')
     const pickFirst = async () => {
       const ui = await mountPane($, 'desktop')
@@ -1311,7 +1364,7 @@ describe('turn picker', () => {
     }
     expect(await pickFirst()).toEqual([`T1 · 1 file · +1 −1  fix  ${REBUILT}`, [['1 - a', '1 + A']]])
     await $.session.end({ reason: 'clear', sessionId: SESSION, resume: { id: SESSION } })
-    swap('cd34', [prompt('fix'), ...editRow(at('a.txt'), 'x\n', 'x', 'X'), reply(), prompt('other'), reply()])
+    swap('cd34', [prompt('fix'), ...editRow(at('a.txt'), 'x\n', 'x', 'X'), reply(), prompt('other'), ...editRow(at('b.txt'), 'b\n', 'b', 'B'), reply()])
     expect(await pickFirst()).toEqual([`T1 · 1 file · +1 −1  fix  ${REBUILT}`, [['1 - x', '1 + X']]])
   })
 
@@ -1323,7 +1376,7 @@ describe('turn picker', () => {
     await edit($, 'c.txt', 'c', 'C')
     await complete($, 't3')
     const ui = await mountPane($, 'terminal')
-    expect((await picker(ui))?.labels).toEqual(['T1 · 0 files · Oldest', 'T2 · 1 file · go on', 'T3 · 1 file · go on'])
+    expect((await picker(ui))?.labels).toEqual(['T2 · 1 file · go on', 'T3 · 1 file · go on'])
     rows.push(command('effort', 'high'), command('turn-diff'), command('turn-diff'))
     // T2 as drawn: the first "go on", b.txt, which the slide numbers T1
     await ui.select({ key: 'turn', value: '2' })
@@ -1357,14 +1410,15 @@ describe('turn picker', () => {
   })
 
   test('a turn that ends unrecorded (its turn.start never reached the mod) is listed all the same', async ($, on) => {
-    const { rows } = world(on, { [at('b.txt')]: 'B\n' }, { transcript: [prompt('Old'), reply()] })
+    const transcript = [prompt('Old'), ...editRow(at('a.txt'), 'a\n', 'a', 'A'), reply()]
+    const { rows } = world(on, { [at('a.txt')]: 'A\n', [at('b.txt')]: 'B\n' }, { transcript })
     await begin($)
-    expect((await pane($, 'terminal')).header).toBe(`T1 · 0 files · +0 −0  Old  ${REBUILT}`)
+    expect((await pane($, 'terminal')).header).toBe(`T1 · 1 file · +1 −1  Old  ${REBUILT}`)
     // only its rows and its end
     rows.push(prompt('Outside'), ...editRow(at('b.txt'), 'b\n', 'b', 'B'))
     await complete($, 't-outside')
     const ui = await mountPane($, 'terminal')
-    expect(await picker(ui)).toEqual({ labels: ['T1 · 0 files · Old', 'T2 · 1 file · Outside'], value: '2' })
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · Old', 'T2 · 1 file · Outside'], value: '2' })
     expect((await look(ui)).header).toBe(`T2 · 1 file · +1 −1  Outside  ${REBUILT}`)
   })
 
@@ -1381,7 +1435,7 @@ describe('turn picker', () => {
     await edit($, 'b.txt', 'b', 'B')
     await complete($, 't3')
     const ui = await mountPane($, 'terminal')
-    expect(await picker(ui)).toEqual({ labels: ['T1 · 0 files', 'T2 · 2 files · Fix', 'T3 · 1 file'], value: '3' })
+    expect(await picker(ui)).toEqual({ labels: ['T2 · 2 files · Fix', 'T3 · 1 file'], value: '3' })
     expect((await look(ui)).rows).toEqual(['b.txt  +1 −1'])
   })
 
@@ -1407,12 +1461,14 @@ describe('turn picker', () => {
   })
 
   test("a prompt cut for the picker's list never splits an emoji", async ($, on) => {
-    world(on, {})
+    world(on, { [at('a.txt')]: 'a\n' })
     await start($, 't1', 'First')
+    await edit($, 'a.txt', 'a', 'A')
     await complete($, 't1')
     await start($, 't2', `x${'😀'.repeat(70)}`)
+    await edit($, 'a.txt', 'A', 'a')
     await complete($, 't2')
-    expect((await picker(await mountPane($, 'desktop')))?.labels).toEqual(['T1 · 0 files · First', `T2 · 0 files · x${'😀'.repeat(58)}…`])
+    expect((await picker(await mountPane($, 'desktop')))?.labels).toEqual(['T1 · 1 file · First', `T2 · 1 file · x${'😀'.repeat(58)}…`])
   })
 
   test('turnHistory off: the transcript is never read, no picker, the last turn numbered since the mod loaded', { options: { turnHistory: false } }, async ($, on) => {
@@ -1420,8 +1476,8 @@ describe('turn picker', () => {
     const { rows, reads } = world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n' }, { transcript })
     await begin($)
     // a resumed session's turns are not shown
-    expect(await $.command.run(RUN)).toMatchObject({ text: 'No turn has finished yet.' })
-    expect((await pane($, 'desktop')).texts).toEqual(['No turn has finished yet.'])
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'No finished turn has changed files yet.' })
+    expect((await pane($, 'desktop')).texts).toEqual(['No finished turn has changed files yet.'])
     await start($, 't1', 'First')
     await edit($, 'a.txt', 'a', 'A')
     await complete($, 't1')
@@ -1438,6 +1494,10 @@ describe('turn picker', () => {
     }
     expect(await $.command.run(RUN)).toMatchObject({ text: 'Closed the last-turn diff.' })
     expect(await $.command.run(RUN)).toMatchObject({ text: 'T2 · 1 file · +1 −1: b.txt' })
+    // a turn without changes leaves T2 on show
+    await start($, 't3', 'Just a question')
+    await complete($, 't3')
+    expect((await pane($, 'terminal')).header).toBe('T2 · 1 file · +1 −1  Second')
     expect(reads()).toBe(0)
   })
 
@@ -1451,7 +1511,7 @@ describe('turn picker', () => {
     await complete($, 't3')
     expect(rows).toHaveLength(4096)
     const ui = await mountPane($, 'terminal')
-    expect((await picker(ui))?.labels).toEqual(['T1 · 0 files · Oldest', 'T2 · 1 file · Second', 'T3 · 1 file · Third'])
+    expect((await picker(ui))?.labels).toEqual(['T2 · 1 file · Second', 'T3 · 1 file · Third'])
     // slash commands between the drawing and the pick push the oldest turn out
     rows.push(command('effort', 'high'), command('turn-diff'), command('turn-diff'))
     await ui.select({ key: 'turn', value: '2' })
@@ -1502,10 +1562,196 @@ describe('turn picker', () => {
     await complete($, 't1')
     expect((await pane($, 'terminal')).rows).toEqual(['a.txt  +1 −1', 'b.txt  +1 −1'])
     await start($, 't2', 'Next')
+    await edit($, 'a.txt', 'A', 'a')
     await complete($, 't2')
     const ui = await mountPane($, 'terminal')
     await ui.select({ key: 'turn', value: '1' })
     expect((await look(ui)).rows).toEqual(['a.txt  +1 −1'])
+  })
+
+  test('turns without changes are not listed and leave the pane as it was: its turn, pick and page', async ($, on) => {
+    const big = (tag: string) => Array.from({ length: 4000 }, (_, i) => `${tag} ${i}\n`).join('')
+    world(on, { [at('x.txt')]: big('x'), [at('y.txt')]: big('y'), [at('z.txt')]: big('z'), [at('a.txt')]: 'a\n' })
+    await start($, 't1', 'Big')
+    for (const tag of ['x', 'y', 'z']) await $.tool.call({ tool: 'Write', file_path: at(`${tag}.txt`), content: big(tag.toUpperCase()) })
+    await complete($, 't1')
+    await start($, 't2', 'Small')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't2')
+    let ui = await mountPane($, 'desktop')
+    await ui.select({ key: 'turn', value: '1' })
+    await ui.press({ key: 'next' })
+    await ui.unmount()
+    for (const [turn, text] of [['t3', 'Just a question'], ['t4', 'Small']] as const) {
+      await start($, turn, text)
+      await complete($, turn)
+    }
+    ui = await mountPane($, 'desktop')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 3 files · Big', 'T2 · 1 file · Small'], value: '1' })
+    expect((await look(ui)).texts).toContain('Page 2 of 3')
+    // the live T2 keeps its number, though the last turn has its prompt
+    await ui.select({ key: 'turn', value: '2' })
+    expect((await look(ui)).header).toBe('T2 · 1 file · +1 −1  Small')
+    await ui.unmount()
+    await start($, 't5', 'More')
+    await edit($, 'a.txt', 'A', 'a')
+    await complete($, 't5')
+    ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 3 files · Big', 'T2 · 1 file · Small', 'T5 · 1 file · More'], value: '5' })
+    await ui.select({ key: 'turn', value: '2' })
+    expect((await look(ui)).header).toBe(`T2 · 1 file · +1 −1  Small  ${REBUILT}`)
+  })
+
+  test('a draw while a turn without changes ends keeps the last turn and its number', async ($, on) => {
+    let reached: () => void = () => undefined
+    let release: () => void = () => undefined
+    const atEnd = new Promise<void>(resolve => (reached = resolve))
+    const held = new Promise<void>(resolve => (release = resolve))
+    const onStatus = (n: number) => (n === 4 ? (reached(), held) : undefined)
+    world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n' }, { vcs: 'git', onStatus })
+    await begin($)
+    await start($, 't1', 'One')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't1')
+    await start($, 't2', 'Two')
+    const ending = complete($, 't2')
+    await atEnd
+    expect((await pane($, 'terminal')).header).toBe('T1 · 1 file · +1 −1  One')
+    release()
+    await ending
+    expect((await pane($, 'terminal')).header).toBe('T1 · 1 file · +1 −1  One')
+    await start($, 't3', 'Three')
+    await edit($, 'b.txt', 'b', 'B')
+    await complete($, 't3')
+    const ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · One', 'T3 · 1 file · Three'], value: '3' })
+  })
+
+  test('a turn that ends unrecorded after the last turn leaves its number alone, and shows as the newest', async ($, on) => {
+    const { rows } = world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'B\n' })
+    await start($, 't1', 'Mine')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't1')
+    // only its rows and its end
+    rows.push(prompt('Outside'), ...editRow(at('b.txt'), 'b\n', 'b', 'B'))
+    await complete($, 't-outside')
+    const ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · Mine', 'T2 · 1 file · Outside'], value: '2' })
+    expect((await look(ui)).header).toBe(`T2 · 1 file · +1 −1  Outside  ${REBUILT}`)
+    await ui.select({ key: 'turn', value: '1' })
+    expect((await look(ui)).header).toBe('T1 · 1 file · +1 −1  Mine')
+  })
+
+  test('turns without changes and with no prompt row (continuations) or an empty one (an image alone) keep the number', async ($, on) => {
+    const { rows } = world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n' })
+    for (const [turn, text] of [['t1', 'go on'], ['t2', 'go on']] as const) {
+      await start($, turn, text)
+      await edit($, turn === 't1' ? 'a.txt' : 'b.txt', turn === 't1' ? 'a' : 'b', 'X')
+      await complete($, turn)
+    }
+    await start($, 't3', '')
+    await complete($, 't3')
+    rows.push(prompt(''))
+    await start($, 't4', '')
+    await complete($, 't4')
+    await start($, 't5', '')
+    await complete($, 't5')
+    let ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · go on', 'T2 · 1 file · go on'], value: '2' })
+    expect((await look(ui)).rows).toEqual(['b.txt  +1 −1'])
+    await ui.unmount()
+    await start($, 't6', 'Next')
+    await edit($, 'a.txt', 'X', 'a')
+    await complete($, 't6')
+    // the image's row is T3, the continuations have none
+    ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · go on', 'T2 · 1 file · go on', 'T4 · 1 file · Next'], value: '4' })
+  })
+
+  test('a turn whose edits cancel out is not listed, and leaves a pick among same prompts where it was', async ($, on) => {
+    world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n', [at('c.txt')]: 'c\n', [at('d.txt')]: 'd\n' })
+    for (const [turn, file] of [['t1', 'a'], ['t2', 'b'], ['t3', 'c']] as const) {
+      await start($, turn, 'go on')
+      await edit($, `${file}.txt`, file, file.toUpperCase())
+      await complete($, turn)
+    }
+    let ui = await mountPane($, 'terminal')
+    await ui.select({ key: 'turn', value: '2' })
+    await ui.unmount()
+    await start($, 't4', 'Try and undo')
+    await edit($, 'd.txt', 'd', 'X')
+    await edit($, 'd.txt', 'X', 'd')
+    await complete($, 't4')
+    ui = await mountPane($, 'terminal')
+    expect((await picker(ui))?.labels).toEqual(['T1 · 1 file · go on', 'T2 · 1 file · go on', 'T3 · 1 file · go on'])
+    expect([(await picker(ui))?.value, (await look(ui)).rows]).toEqual(['2', ['b.txt  +1 −1']])
+    await ui.select({ key: 'turn', value: '3' })
+    expect((await look(ui)).header).toBe('T3 · 1 file · +1 −1  go on')
+  })
+
+  test('a turn whose edits cancel out is not shown before any turn has changes, nor after a resume', async ($, on) => {
+    const transcript = [prompt('go on'), ...editRow(at('a.txt'), 'a\n', 'a', 'A'), reply(), prompt('go on'), ...editRow(at('b.txt'), 'b\n', 'b', 'B'), reply()]
+    const { swap } = world(on, { [at('a.txt')]: 'A\n', [at('b.txt')]: 'B\n', [at('c.txt')]: 'c\n' })
+    // its prompt is one of the resumed conversation's too: the resume forgets it
+    await start($, 't1', 'go on')
+    await edit($, 'c.txt', 'c', 'X')
+    await edit($, 'c.txt', 'X', 'c')
+    await complete($, 't1')
+    expect((await pane($, 'terminal')).texts).toEqual(['No finished turn has changed files yet.'])
+    await $.session.end({ reason: 'resume', sessionId: SESSION, resume: { id: 'cd34' } })
+    swap('cd34', transcript)
+    let ui = await mountPane($, 'terminal')
+    await ui.select({ key: 'turn', value: '1' })
+    await ui.unmount()
+    await start($, 't2', 'go on')
+    await edit($, 'c.txt', 'c', 'X')
+    await edit($, 'c.txt', 'X', 'c')
+    await complete($, 't2')
+    ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · go on', 'T2 · 1 file · go on'], value: '1' })
+    expect((await look(ui)).rows).toEqual(['a.txt  +1 −1'])
+  })
+
+  test('turns without changes whose prompt has no row (a message from another session) keep the number', async ($, on) => {
+    const { rows } = world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n' })
+    await start($, 't1', 'A')
+    await edit($, 'a.txt', 'a', 'X')
+    await complete($, 't1')
+    await start($, 't2', '')
+    await edit($, 'b.txt', 'b', 'X')
+    await complete($, 't2')
+    for (const turn of ['t3', 't4']) {
+      await start($, turn, `From another session ${turn}`)
+      rows.pop()
+      await complete($, turn)
+    }
+    const ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 2 files · A', 'T2 · 1 file'], value: '2' })
+    expect((await look(ui)).rows).toEqual(['b.txt  +1 −1'])
+  })
+
+  test('mixed turns after the last one place it: unrecorded, continuation, image alone, question', async ($, on) => {
+    const { rows } = world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n', [at('c.txt')]: 'C\n' })
+    await start($, 't1', 'A')
+    await edit($, 'a.txt', 'a', 'X')
+    await complete($, 't1')
+    await start($, 't2', 'Fix')
+    await edit($, 'b.txt', 'b', 'X')
+    await complete($, 't2')
+    rows.push(prompt('Outside'), ...editRow(at('c.txt'), 'c\n', 'c', 'C'))
+    await complete($, 't-outside')
+    await start($, 't3', '')
+    await complete($, 't3')
+    rows.push(prompt(''))
+    await start($, 't4', '')
+    await complete($, 't4')
+    await start($, 't5', 'Q')
+    await complete($, 't5')
+    const ui = await mountPane($, 'terminal')
+    // the unrecorded turn keeps its edits, and is the newest
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · A', 'T2 · 1 file · Fix', 'T3 · 1 file · Outside'], value: '3' })
+    await ui.select({ key: 'turn', value: '2' })
+    expect((await look(ui)).header).toBe('T2 · 1 file · +1 −1  Fix')
   })
 
   test('denied, errored and staged calls stay out of a rebuilt turn too', async ($, on) => {
@@ -1520,6 +1766,7 @@ describe('turn picker', () => {
     await edit($, 'ok.txt', 'ok', 'OK')
     await complete($, 't1')
     await start($, 't2', 'Next')
+    await edit($, 'ok.txt', 'OK', 'ok')
     await complete($, 't2')
     const ui = await mountPane($, 'desktop')
     await ui.select({ key: 'turn', value: '1' })

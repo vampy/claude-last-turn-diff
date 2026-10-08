@@ -33,6 +33,7 @@ const turns = atom({ plugin: 'last-turn-diff', key: 'turns' } as const, 0)
 const vcs = atom({ plugin: 'last-turn-diff', key: 'vcs' } as const, null)
 const recording = atom({ plugin: 'last-turn-diff', key: 'recording' } as const, null)
 const lastTurn = atom({ plugin: 'last-turn-diff', key: 'lastTurn' } as const, null)
+const later = atom({ plugin: 'last-turn-diff', key: 'later' } as const, [])
 const isBandHidden = atom({ plugin: 'last-turn-diff', key: 'isBandHidden' } as const, false)
 const page = atom({ plugin: 'last-turn-diff', key: 'page' } as const, 0)
 const picked = atom({ plugin: 'last-turn-diff', key: 'picked' } as const, null)
@@ -244,9 +245,12 @@ const totals = (files: readonly FileDiff[]) => ({
   removed: files.reduce((sum, f) => sum + f.removed, 0),
 })
 
+/** What the pane says with no turn to show. */
+const NO_TURN = 'No finished turn has changed files yet.'
+
 function describe(turn: Shown | null): string {
-  if (turn === null) return 'No turn has finished yet.'
-  if (turn.files.length === 0) return `T${turn.turn}: the last turn changed no files.`
+  if (turn === null) return NO_TURN
+  if (turn.files.length === 0) return `T${turn.turn} changed no files.`
   const { added, removed } = totals(turn.files)
   const names = turn.files.slice(0, 10).map(f => f.path)
   if (turn.files.length > 10) names.push(`${turn.files.length - 10} more`)
@@ -289,17 +293,27 @@ async function load($: EngineInterface, history: History): Promise<TranscriptTur
 }
 
 /**
- * The picker's entries, the live recording's number among them, and the number to show: the pick, else the newest.
- * A pick is found by its place from the newest turn, which only a new turn moves (and a new turn drops the pick):
- * the numbers shift as the oldest turns leave the 4,096-entry window or a compaction. Its prompt confirms it, or finds
- * the one with that prompt nearest that place. The live recording is the transcript's last turn when it has that
- * prompt, else the one after it (a continuation has no row).
+ * The picker's entries (the turns that changed files), the live recording's number among them, and the number to
+ * show: the pick, else the newest. A pick is found by its place from the newest entry, which a turn without changes
+ * leaves (and one with changes drops the pick): the numbers shift as the oldest turns leave the 4,096-entry window or
+ * a compaction. Its prompt confirms it, or finds the one with that prompt nearest that place. The live recording is
+ * the transcript's turn before the ones that ended after it without changes when that turn has its prompt, else the
+ * one after it (a continuation has no row).
  */
-function resolve(listed: readonly Listed[], live: LastTurn | null, pick: PickedTurn | null) {
-  const last = listed[listed.length - 1]
-  const number = live === null ? undefined : last !== undefined && last.prompt === live.prompt ? last.turn : (last?.turn ?? 0) + 1
+function resolve(listed: readonly Listed[], live: LastTurn | null, after: readonly (string | null)[], pick: PickedTurn | null) {
+  // back over the turns that ended without changes: each is the row with its prompt, or has none (a continuation, a
+  // message from another session); one unrecorded has its row. Those recorded leave the list, whatever their calls did
+  let i = listed.length - 1
+  const quiet = new Set<number>()
+  for (const prompt of [...after].reverse()) {
+    if (prompt !== null && listed[i]?.prompt !== prompt) continue
+    if (prompt !== null) quiet.add(i)
+    i--
+  }
+  const mine = listed[i]
+  const number = live === null ? undefined : mine?.prompt === live.prompt ? mine.turn : (mine?.turn ?? 0) + 1
   const entries = [
-    ...listed.filter(t => t.turn !== number),
+    ...listed.filter((t, k) => t.turn !== number && t.files > 0 && !quiet.has(k)),
     ...(live === null ? [] : [{ turn: number!, prompt: live.prompt, files: live.files.length }]),
   ].sort((a, b) => a.turn - b.turn)
   const at = entries.length - (pick?.fromEnd ?? 0)
@@ -326,12 +340,13 @@ async function shown($: EngineInterface, history: History, isListed: boolean): P
   }
   let found = history.turns === undefined ? await load($, history) : undefined
   const live = await read($, lastTurn)
+  const after = await read($, later)
   const pick = await read($, picked)
-  let view = resolve(history.turns ?? [], live, pick)
+  let view = resolve(history.turns ?? [], live, after, pick)
   if (view.want !== undefined && view.want !== view.number && history.rebuilt?.turn !== view.want) {
     if (found === undefined) {
       found = await load($, history)
-      view = resolve(history.turns ?? [], live, pick)
+      view = resolve(history.turns ?? [], live, after, pick)
     }
     const turn = found.find(t => t.turn === view.want && t.turn !== view.number)
     if (turn !== undefined) {
@@ -346,6 +361,9 @@ async function shown($: EngineInterface, history: History, isListed: boolean): P
     : null
   return { turn, entries: view.entries }
 }
+
+/** A turn ended without changes, or unrecorded, and leaves the last one on show: its prompt, null when unrecorded. */
+const passed = ($: EngineInterface, prompt: string | null) => update($, later, list => [...list, prompt])
 
 /** The text cut to 60 code points, so no emoji is cut in half. */
 function short(text: string): string {
@@ -384,6 +402,7 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       history.ended = e.sessionId
       await update($, lastTurn, () => null)
+      await update($, later, () => [])
       await update($, picked, () => null)
       await update($, page, () => 0)
     }
@@ -477,9 +496,10 @@ export const register: Register = (on, options) => {
     if (open === null) {
       // a turn started before the mod loaded: the transcript holds one more turn
       forget(history)
+      await passed($, null)
       return next(e)
     }
-    // until `lastTurn` holds it, a read of the transcript leaves this turn out as a running one
+    // until its end is recorded, a read of the transcript leaves this turn out as a running one
     history.ending = open.prompt
     await update($, recording, () => null)
     const cwd = await $.session.cwd()
@@ -503,10 +523,19 @@ export const register: Register = (on, options) => {
       const file = diffFile({ ...held, path: clean(relativePath(cwd, held.path)), after })
       if (file !== null) files.push(file)
     }
-    // the transcript holds one more turn: read it again when next shown
+    // the transcript holds one more turn: read it again when next shown. `ending` goes before the write to `lastTurn`:
+    // a draw between them reads this turn in the transcript, and the write draws again with it counted
     forget(history)
-    await update($, lastTurn, () => ({ turn: open.turn, prompt: open.prompt, files, notes }))
     history.ending = undefined
+    // a note says shell changes may be missing: it counts only where a shell command ran
+    if (files.length === 0 && (notes.length === 0 || open.hasShellRun !== true)) {
+      // the last turn, its pick and page stay on show; the band goes
+      await passed($, open.prompt)
+      await update($, isBandHidden, () => true)
+      return next(e)
+    }
+    await update($, later, () => [])
+    await update($, lastTurn, () => ({ turn: open.turn, prompt: open.prompt, files, notes }))
     await update($, isBandHidden, () => false)
     await update($, page, () => 0)
     await update($, picked, () => null)
@@ -519,7 +548,7 @@ export const register: Register = (on, options) => {
     if (e.surface === 'mobile') return next(e)
     const { Box, Button, Code, Select, Text } = $.ui.resolve(e)
     const { turn, entries } = await shown($, history, options.turnHistory !== false)
-    if (turn === null) return <Text dimColor>No turn has finished yet.</Text>
+    if (turn === null) return <Text dimColor>{NO_TURN}</Text>
     const picker = entries.length > 1 && (
       <Select
         key="turn"
