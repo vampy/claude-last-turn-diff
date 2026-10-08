@@ -44,7 +44,7 @@ const str = (value: unknown) => (typeof value === 'string' ? value : undefined)
 const lf = (text: string) => text.replace(/\r\n/g, '\n')
 
 /** The file an Edit, Write or NotebookEdit call names; undefined for any other tool. */
-const pathOf = (use: ToolUseSummary) =>
+export const pathOf = (use: ToolUseSummary) =>
   use.tool === 'NotebookEdit' ? str(use.input.notebook_path)
   : use.tool === 'Edit' || use.tool === 'Write' ? str(use.input.file_path)
   : undefined

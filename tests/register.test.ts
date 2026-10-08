@@ -56,6 +56,12 @@ type WorldOptions = {
   transcript?: SessionMessage[]
   /** Called on each status run (git or cm), numbered from 1; the run waits for what it returns. */
   onStatus?: (n: number) => Promise<unknown> | undefined
+  /** Environment variables besides TEMP, which is always set. */
+  env?: Record<string, string>
+  /** The session's cwd; CWD by default. */
+  cwd?: string
+  /** Folders that are links or junctions, by path: where each lands. */
+  links?: Record<string, string>
 }
 
 const ROOT = 'c:/proj/'
@@ -75,7 +81,7 @@ const xmlText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt
 function world(
   on: On,
   files: Record<string, string>,
-  { lies = {}, unplaced, vcs, base = files, shell = {}, moves = {}, binaries = [], isStatusBroken, isTranscriptBroken, transcript = [], onStatus }: WorldOptions = {},
+  { lies = {}, unplaced, vcs, base = files, shell = {}, moves = {}, binaries = [], isStatusBroken, isTranscriptBroken, transcript = [], onStatus, env = {}, cwd = CWD, links = {} }: WorldOptions = {},
 ) {
   const rows = [...transcript]
   let reads = 0
@@ -228,7 +234,7 @@ function world(
   }
   on('tool.call', { tool: 'Bash' }, ($, e) => record('Bash', { command: e.command }, run(e.command)))
   on('tool.call', { tool: 'PowerShell' }, ($, e) => record('PowerShell', { command: e.command }, run(e.command)))
-  on('env.get', ($, e) => ({ value: e.name === 'TEMP' ? 'C:\\Users\\me\\AppData\\Local\\Temp' : undefined }))
+  on('env.get', ($, e) => ({ value: ({ TEMP: 'C:\\Users\\me\\AppData\\Local\\Temp', ...env } as Record<string, string>)[e.name] }))
   on('session.id', () => ({ value: sessionId }))
   on('fs.write', ($, e) => {
     disk.set(norm(e.path), e.text)
@@ -236,6 +242,10 @@ function world(
   })
   on('fs.exists', ($, e) => ({ value: disk.has(norm(e.path)) }))
   on('fs.stat', ($, e) => {
+    const link = Object.entries(links).find(([from]) => norm(from) === norm(e.path))
+    if (link !== undefined) {
+      return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: true, ...(e.resolve ? { realPath: link[1] } : {}) } }
+    }
     const text = disk.get(norm(e.path))
     return text === undefined
       ? { deny: 'ENOENT' }
@@ -245,7 +255,7 @@ function world(
     const text = disk.get(norm(e.path))
     return text === undefined ? { deny: 'ENOENT' } : { value: text }
   })
-  on('session.cwd', () => ({ value: CWD }))
+  on('session.cwd', () => ({ value: cwd }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
   // a continuation starts with no typed prompt, and no row
@@ -1771,5 +1781,127 @@ describe('turn picker', () => {
     const ui = await mountPane($, 'desktop')
     await ui.select({ key: 'turn', value: '1' })
     expect((await look(ui)).rows).toEqual(['ok.txt  +1 −1'])
+  })
+})
+
+describe("Claude's own files", () => {
+  const TEMP = 'C:\\Users\\me\\AppData\\Local\\Temp\\claude\\C--proj\\s1\\scratchpad\\msg.txt'
+  const save = ($: Engine, path: string, content = 'msg\n') => $.tool.call({ tool: 'Write', file_path: path, content })
+
+  test('are left out of a turn, live and rebuilt; a turn changing only them changes nothing', async ($, on) => {
+    // the folder where it lands too, as the CLI hands it out: here TEMP is a junction
+    const links = { 'C:\\Users\\me\\AppData\\Local\\Temp': 'D:\\Temp' }
+    world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n' }, { links })
+    await start($, 't1', 'Commit')
+    await save($, TEMP)
+    await save($, 'D:\\Temp\\claude\\s1\\scratchpad\\two.txt')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't1')
+    expect((await pane($, 'terminal')).rows).toEqual(['a.txt  +1 −1'])
+    await start($, 't2', 'Write it down')
+    await save($, TEMP, 'again\n')
+    await complete($, 't2')
+    expect((await pane($, 'terminal')).header).toBe('T1 · 1 file · +1 −1  Commit')
+    await start($, 't3', 'Next')
+    await edit($, 'b.txt', 'b', 'B')
+    await complete($, 't3')
+    const ui = await mountPane($, 'terminal')
+    expect(await picker(ui)).toEqual({ labels: ['T1 · 1 file · Commit', 'T3 · 1 file · Next'], value: '3' })
+    await ui.select({ key: 'turn', value: '1' })
+    expect((await look(ui)).rows).toEqual(['a.txt  +1 −1'])
+  })
+
+  test('hideClaudeFiles off: they show like any other file', { options: { hideClaudeFiles: false } }, async ($, on) => {
+    world(on, { [at('b.txt')]: 'b\n' })
+    await start($, 't1', 'Commit')
+    await save($, TEMP)
+    await complete($, 't1')
+    const shown = 'C:/Users/me/AppData/Local/Temp/claude/C--proj/s1/scratchpad/msg.txt  +1 −0  new'
+    expect((await pane($, 'terminal')).rows).toEqual([shown])
+    await start($, 't2', 'Next')
+    await edit($, 'b.txt', 'b', 'B')
+    await complete($, 't2')
+    const ui = await mountPane($, 'terminal')
+    expect((await picker(ui))?.labels).toEqual(['T1 · 1 file · Commit', 'T2 · 1 file · Next'])
+    await ui.select({ key: 'turn', value: '1' })
+    expect((await look(ui)).rows).toEqual([shown])
+  })
+
+  test('CLAUDE_CODE_TMPDIR names the folder; a session run inside it sees its own files', async ($, on) => {
+    world(on, { 'D:\\tmp\\claude\\work\\c.txt': 'c\n' }, { env: { CLAUDE_CODE_TMPDIR: 'D:\\tmp\\' }, cwd: 'D:\\tmp\\claude\\work' })
+    await start($, 't1', 'Here')
+    await save($, 'D:\\tmp\\claude\\work\\a.txt')
+    await save($, 'D:\\tmp\\claude\\other\\b.txt')
+    // a folder whose name starts with the cwd's is not under it
+    await save($, 'D:\\tmp\\claude\\work2\\x.txt')
+    // the system's temporary folder is not Claude's while CLAUDE_CODE_TMPDIR is set
+    await save($, TEMP)
+    await complete($, 't1')
+    const rows = ['a.txt  +1 −0  new', 'C:/Users/me/AppData/Local/Temp/claude/C--proj/s1/scratchpad/msg.txt  +1 −0  new']
+    expect((await pane($, 'terminal')).rows).toEqual(rows)
+    await start($, 't2', 'Next')
+    await $.tool.call({ tool: 'Edit', file_path: 'D:\\tmp\\claude\\work\\c.txt', old_string: 'c', new_string: 'C' })
+    await complete($, 't2')
+    const ui = await mountPane($, 'terminal')
+    expect((await picker(ui))?.labels).toEqual(['T1 · 2 files · Here', 'T2 · 1 file · Next'])
+    await ui.select({ key: 'turn', value: '1' })
+    expect((await look(ui)).rows).toEqual(rows)
+  })
+
+  test('its memory and plans are left out, under CLAUDE_CONFIG_DIR or else ~/.claude, from any cwd', async ($, on) => {
+    const home = 'C:\\Users\\me\\.claude'
+    const transcript = [
+      prompt('Plan'),
+      ...call('NotebookEdit', { notebook_path: `${home}\\projects\\C--proj\\memory\\nb.ipynb` }, { text: 'ok', result: { original_file: '{}', updated_file: '{"cells":[]}' } }),
+      ...write(`${home}\\notes.md`, 'n\n', null),
+      reply(),
+    ]
+    world(on, {}, { env: { USERPROFILE: 'C:\\Users\\me' }, cwd: 'C:\\Users\\me', transcript })
+    await start($, 't1', 'Remember')
+    await save($, `${home}\\projects\\C--proj\\memory\\note.md`)
+    await save($, `${home}\\agent-memory\\reviewer\\MEMORY.md`)
+    await save($, `${home}\\plans\\plan.md`)
+    // the rest of the config folder is the user's: settings, instructions, skills
+    await save($, `${home}\\CLAUDE.md`)
+    await complete($, 't1')
+    const ui = await mountPane($, 'terminal')
+    expect((await look(ui)).rows).toEqual(['.claude/CLAUDE.md  +1 −0  new'])
+    expect((await picker(ui))?.labels).toEqual(['T1 · 1 file · Plan', 'T2 · 1 file · Remember'])
+    await ui.select({ key: 'turn', value: '1' })
+    expect((await look(ui)).rows).toEqual(['.claude/notes.md  +1 −0  new'])
+  })
+
+  test('CLAUDE_CONFIG_DIR names the config folder: ~/.claude is then the user\'s', async ($, on) => {
+    world(on, {}, { env: { CLAUDE_CONFIG_DIR: 'D:\\cfg', USERPROFILE: 'C:\\Users\\me' } })
+    await start($, 't1', 'Plan')
+    await save($, 'D:\\cfg\\plans\\p.md')
+    await save($, 'C:\\Users\\me\\.claude\\plans\\q.md')
+    await complete($, 't1')
+    expect((await pane($, 'terminal')).rows).toEqual(['C:/Users/me/.claude/plans/q.md  +1 −0  new'])
+  })
+
+  test('on Linux and macOS: under TMPDIR, /tmp and HOME', async ($, on) => {
+    // the test kit, on Windows, shows a mod no POSIX file on disk: a resumed session's rebuilt turn holds them
+    const transcript = [
+      prompt('Old'),
+      ...write('/var/folders/x/T/claude/s1/scratchpad/m.txt', 'm\n', null),
+      ...write('/tmp/claude/s1/scratchpad/n.txt', 'n\n', null),
+      ...write('/home/me/.claude/plans/p.md', 'p\n', null),
+      ...write('/home/me/proj/a.txt', 'a\n', null),
+      reply(),
+    ]
+    world(on, {}, { env: { TMPDIR: '/var/folders/x/T/', HOME: '/home/me' }, cwd: '/home/me/proj', transcript })
+    await begin($)
+    expect((await pane($, 'terminal')).header).toBe(`T1 · 1 file · +1 −0  Old  ${REBUILT}`)
+    expect((await pane($, 'terminal')).rows).toEqual(['a.txt  +1 −0  new'])
+  })
+
+  test('on Windows a folder spelled from / is not one: /tmp lands on the session\'s drive', async ($, on) => {
+    // where the test kit, as the engine, takes /tmp on Windows
+    world(on, {}, { links: { 'D:\\tmp': 'D:\\tmp' } })
+    await start($, 't1', 'Mine')
+    await save($, 'D:\\tmp\\claude\\notes\\x.txt')
+    await complete($, 't1')
+    expect((await pane($, 'terminal')).rows).toEqual(['D:/tmp/claude/notes/x.txt  +1 −0  new'])
   })
 })

@@ -23,6 +23,12 @@
       "description": "Lists the conversation's turns that changed files in the pane, so an earlier one can be picked and its changes rebuilt from the transcript. Off, the pane shows only the last turn with changes, numbered from when the mod loaded, and the transcript is never read.",
       "default": true
     },
+    "hideClaudeFiles": {
+      "type": "boolean",
+      "title": "Hide Claude's own files",
+      "description": "Leaves out Claude Code's own files: its temporary folder (scratchpads, pasted images), claude under CLAUDE_CODE_TMPDIR or else the system's temporary folder, and its memory and plans, projects, agent-memory and plans under CLAUDE_CONFIG_DIR or else ~/.claude. A session run inside one of those folders still sees its own files.",
+      "default": true
+    },
     "svgDiffs": {
       "type": "boolean",
       "title": "Draw diffs as images on Desktop",

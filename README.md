@@ -1,8 +1,9 @@
 # last-turn-diff
 
 A Claude Code mod that adds a Codex-style "Last turn" diff. After each turn, one pane shows every file
-changed during that turn, as one net diff per file. It works in the Claude Desktop Code tab and in the
-terminal. Claude's `Edit`, `Write` and `NotebookEdit` calls are seen under any version control, or none.
+changed during that turn (except Claude's own scratch, memory and plan files: see `hideClaudeFiles`), as
+one net diff per file. It works in the Claude Desktop Code tab and in the terminal. Claude's `Edit`,
+`Write` and `NotebookEdit` calls are seen under any version control, or none.
 Inside a git repository or a Plastic SCM workspace, files changed by shell commands, scripts and builds
 show too: the mod reads the version control's status around each turn.
 
@@ -113,6 +114,17 @@ backslashes in the path (`C:\\path\\to\\claude-last-turn-diff-mod`).
   changes rebuilt from the transcript. Off, the mod never reads the transcript: the pane shows only the last turn with
   changes the mod recorded, numbered from when it loaded (slash commands don't count), and after a restart or `--resume` nothing
   until a turn ends. Turn it off if reading the transcript after each turn is slow in a long session.
+- `hideClaudeFiles` (on by default): leave out Claude Code's own files, live and in rebuilt turns:
+  - its temporary folder, such as the scratchpad where it writes notes and commit messages: `claude` under
+    `CLAUDE_CODE_TMPDIR`, or else under each of `TEMP`, `TMP` and `TMPDIR` the environment names, and `/tmp`;
+  - its memory and plans: `projects`, `agent-memory` and `plans` in its config folder, `CLAUDE_CONFIG_DIR` or else
+    `.claude` in the home folder (`HOME` or `USERPROFILE`). The rest of that folder (settings, `CLAUDE.md`, skills)
+    still shows, and so does memory or a plan a setting moved elsewhere.
+
+  Each folder is matched under its parent as spelled and where that lands (a symlink or junction's target; macOS's
+  `/private/var`). On Windows a parent spelled from `/` (such as `/tmp`) is skipped: it would land on the session's
+  drive. A turn that changed only such files counts as changing nothing. A session run inside one of those folders
+  still sees the files under its own cwd.
 - `svgDiffs` (on by default): in the Desktop Code tab, draw each file's hunks as SVG images. Desktop (app
   2.26454) draws a `Code` element's `format: 'diff'` as plain `diff` text, with no line numbers, line
   backgrounds or language colors, so the mod draws them itself. An image's text can't be selected, so each
@@ -126,7 +138,9 @@ key `last-turn-diff@inline` works too; it is the one `claude plugin configure` w
 
 ```json
 "pluginConfigs": {
-  "last-turn-diff": { "options": { "autoOpen": false, "shellEdits": false, "turnHistory": false, "svgDiffs": false } }
+  "last-turn-diff": {
+    "options": { "autoOpen": false, "shellEdits": false, "turnHistory": false, "hideClaudeFiles": false, "svgDiffs": false }
+  }
 }
 ```
 

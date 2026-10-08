@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { FileDiff, Hunk, LastTurn, PendingFile, PickedTurn, Recording, Vcs } from '../types'
 import { blocks, clean, diffFile, fileKey, MAX_SIZE, paginate, relativePath, textSize } from './diff'
-import { editsOf, promptLine, rebuildFiles, turnsOf } from './history'
+import { editsOf, pathOf, promptLine, rebuildFiles, turnsOf } from './history'
 import type { TranscriptTurn } from './history'
 import type { Entry, Status } from './vcs'
 import { drawHunks } from './svg'
@@ -137,6 +137,42 @@ async function landed($: EngineInterface, vcs: Vcs, from: string, to: string): P
 async function scratch($: EngineInterface): Promise<string> {
   const tmp = (await $.env.get('TEMP')) ?? (await $.env.get('TMP')) ?? (await $.env.get('TMPDIR')) ?? '/tmp'
   return join(tmp, `claude-last-turn-diff/${(await $.session.id()).slice(0, 2)}`)
+}
+
+/**
+ * Where Claude Code keeps its own files, as keys ending in `/`: its temporary folder (scratchpads, pasted images),
+ * `claude` under `$CLAUDE_CODE_TMPDIR` or else the system's; and its memory and plans, `projects`, `agent-memory` and
+ * `plans` in its config folder, `$CLAUDE_CONFIG_DIR` or else `.claude` in the home folder. Each folder the environment
+ * names, as the CLI picks one by platform, under the parent as spelled and where it lands: the CLI hands out the
+ * temporary folder's real path (macOS: /var and /tmp under /private; a junction's target).
+ */
+async function claudeOwn($: EngineInterface, cwd: string): Promise<string[]> {
+  // the engine lists the variables a module reads: each name spelled out
+  const tmp = (await $.env.get('CLAUDE_CODE_TMPDIR')) || undefined
+  const tmps = tmp !== undefined ? [tmp] : [await $.env.get('TEMP'), await $.env.get('TMP'), await $.env.get('TMPDIR'), '/tmp']
+  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || undefined
+  const homes = config !== undefined ? [] : [await $.env.get('HOME'), await $.env.get('USERPROFILE')]
+  const configs = config !== undefined ? [config] : homes.map(home => home && join(home, '.claude'))
+  // on Windows a folder spelled from / lands on the session's drive, never where Claude Code keeps anything
+  const isWindows = /^(?:[a-z]:|\\\\)/i.test(cwd)
+  const places = [
+    ...tmps.map(base => ({ base, names: ['claude'] })),
+    ...configs.map(base => ({ base, names: ['projects', 'agent-memory', 'plans'] })),
+  ].filter((place): place is { base: string; names: string[] } => !!place.base && !(isWindows && /^[\\/]/.test(place.base)))
+  const keys = await Promise.all(
+    places.map(async ({ base, names }) => {
+      const real = await $.fs.stat(base, { resolve: true }).then(found => found.realPath, () => undefined)
+      return [base, real].flatMap(at => (at === undefined ? [] : names.map(name => fileKey(join(join(at, name), '')))))
+    }),
+  )
+  return keys.flat()
+}
+
+/** A file of Claude Code's own: inside one of its folders, unless the session runs in that folder and the file is under its cwd. */
+function isClaudeOwn(roots: readonly string[], cwd: string, path: string): boolean {
+  const file = fileKey(path)
+  const here = fileKey(join(cwd, ''))
+  return roots.some(root => file.startsWith(root) && !(here.startsWith(root) && file.startsWith(here)))
 }
 
 const addNote = ($: EngineInterface, turnId: string, note: string) =>
@@ -282,9 +318,17 @@ const forget = (history: History) => {
   history.drawn = undefined
 }
 
-/** Reads the transcript's turns into `history`, leaving out one still running or ending (read mid-turn after a reload or a resume). */
-async function load($: EngineInterface, history: History): Promise<TranscriptTurn[]> {
-  const found = turnsOf(await $.session.messages().catch(() => []))
+/**
+ * Reads the transcript's turns into `history`, leaving out one still running or ending (read mid-turn after a reload or
+ * a resume), and with `hides`, the calls on Claude Code's own files.
+ */
+async function load($: EngineInterface, history: History, hides: boolean): Promise<TranscriptTurn[]> {
+  const cwd = await $.session.cwd()
+  const roots = hides ? await claudeOwn($, cwd) : []
+  const found = turnsOf(await $.session.messages().catch(() => [])).map(t => ({
+    ...t,
+    uses: t.uses.filter(use => !isClaudeOwn(roots, cwd, pathOf(use) ?? '')),
+  }))
   const open = (await read($, recording))?.prompt ?? history.ending
   if (open !== undefined && found[found.length - 1]?.prompt === open) found.pop()
   forget(history)
@@ -327,8 +371,14 @@ function resolve(listed: readonly Listed[], live: LastTurn | null, after: readon
 /**
  * The turn the pane shows and the picker's entries; a turn is rebuilt from a fresh read of the transcript. With turn
  * history off (`isListed` false) the transcript is never read: the last turn alone, numbered from when the mod loaded.
+ * `hides` leaves Claude Code's own files out of what is read.
  */
-async function shown($: EngineInterface, history: History, isListed: boolean): Promise<{ turn: Shown | null; entries: Listed[] }> {
+async function shown(
+  $: EngineInterface,
+  history: History,
+  isListed: boolean,
+  hides: boolean,
+): Promise<{ turn: Shown | null; entries: Listed[] }> {
   if (!isListed) return { turn: await read($, lastTurn), entries: [] }
   const id = await $.session.id()
   // drawn after a /clear or a resume ended it, before the next conversation is in place: nothing of it
@@ -338,14 +388,14 @@ async function shown($: EngineInterface, history: History, isListed: boolean): P
     history.id = id
     forget(history)
   }
-  let found = history.turns === undefined ? await load($, history) : undefined
+  let found = history.turns === undefined ? await load($, history, hides) : undefined
   const live = await read($, lastTurn)
   const after = await read($, later)
   const pick = await read($, picked)
   let view = resolve(history.turns ?? [], live, after, pick)
   if (view.want !== undefined && view.want !== view.number && history.rebuilt?.turn !== view.want) {
     if (found === undefined) {
-      found = await load($, history)
+      found = await load($, history, hides)
       view = resolve(history.turns ?? [], live, after, pick)
     }
     const turn = found.find(t => t.turn === view.want && t.turn !== view.number)
@@ -426,7 +476,7 @@ export const register: Register = (on, options) => {
     await update($, page, () => 0)
     const opened = await $.ui.open({ id: PANE, title: TITLE })
     const unplaced = opened.isPlaced ? '' : ` (no pane shown: ${opened.reason})`
-    return { text: describe((await shown($, history, options.turnHistory !== false)).turn) + unplaced }
+    return { text: describe((await shown($, history, options.turnHistory !== false, options.hideClaudeFiles !== false)).turn) + unplaced }
   })
 
   // Only the main loop raises turn.start; a subagent's run and a local slash command do not.
@@ -514,8 +564,11 @@ export const register: Register = (on, options) => {
     if (repo !== null && open.base !== undefined) {
       for (const [id, file] of await shellFiles($, repo, open, touched, notes)) touched.set(id, file)
     }
+    const roots = options.hideClaudeFiles === false || touched.size === 0 ? [] : await claudeOwn($, cwd)
     const files: FileDiff[] = []
     for (const held of touched.values()) {
+      // a scratchpad file, a commit message Claude wrote down: not the turn's work
+      if (isClaudeOwn(roots, cwd, held.path)) continue
       // a file recorded by size and mtime is unchanged while both are
       const now = held.stamp === undefined ? undefined : await $.fs.stat(held.path).catch(() => undefined)
       if (now !== undefined && now.size === held.stamp!.size && now.mtimeMs === held.stamp!.mtimeMs) continue
@@ -547,7 +600,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface === 'mobile') return next(e)
     const { Box, Button, Code, Select, Text } = $.ui.resolve(e)
-    const { turn, entries } = await shown($, history, options.turnHistory !== false)
+    const { turn, entries } = await shown($, history, options.turnHistory !== false, options.hideClaudeFiles !== false)
     if (turn === null) return <Text dimColor>{NO_TURN}</Text>
     const picker = entries.length > 1 && (
       <Select
