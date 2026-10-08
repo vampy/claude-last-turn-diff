@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { FileDiff, Hunk, LastTurn, PendingFile, PickedTurn, Recording, Vcs } from '../types'
+import type { FileDiff, Hunk, LastTurn, PendingFile, PickedTurn, Recording, ToolRun, Vcs } from '../types'
 import { blocks, clean, diffFile, fileKey, MAX_SIZE, paginate, relativePath, textSize } from './diff'
 import { editsOf, pathOf, promptLine, rebuildFiles, turnsOf } from './history'
 import type { TranscriptTurn } from './history'
@@ -177,6 +177,32 @@ function isClaudeOwn(roots: readonly string[], cwd: string, path: string): boole
   const file = fileKey(path)
   const here = fileKey(join(cwd, ''))
   return roots.some(root => file.startsWith(root) && !(here.startsWith(root) && file.startsWith(here)))
+}
+
+/** Leeway around a call's run for a file system's coarse mtimes (FAT's 2 s) and a network share's clock. */
+const MTIME_SLACK = 2000
+
+/**
+ * Whether one of the turn's calls was running as a file only the status lists (no Edit of the turn's) was last written,
+ * by its mtime (undefined: deleted). A deleted file, or one that kept a date from before the turn (a copy, a move), goes
+ * by its folder's, which changes as an entry comes or goes. Not what another session or an editor wrote between calls.
+ */
+async function isTurnWrite(
+  $: EngineInterface,
+  startedAt: number | undefined,
+  runs: readonly ToolRun[],
+  path: string,
+  mtimeMs: number | undefined,
+): Promise<boolean> {
+  // recorded before calls were timed: everything counts, as it did then
+  if (startedAt === undefined) return true
+  const at =
+    mtimeMs !== undefined && mtimeMs >= startedAt - MTIME_SLACK
+      ? mtimeMs
+      : await $.fs.stat(path.replace(/[\\/][^\\/]*$/, '')).then(folder => folder.mtimeMs, () => undefined)
+  // its folder gone too: nothing tells
+  if (at === undefined) return true
+  return runs.some(run => at >= run.from - MTIME_SLACK && at <= (run.to ?? Infinity) + MTIME_SLACK)
 }
 
 const addNote = ($: EngineInterface, turnId: string, note: string) =>
@@ -441,6 +467,8 @@ const fit = (path: string, room: number) => (path.length > room ? `…${path.sli
 export const register: Register = (on, options) => {
   /** The turn-start snapshot in flight; module-local, so a reload drops it and the turn goes on without one. */
   let snapshotting: Promise<unknown> = Promise.resolve()
+  /** The calls running now, by when each started: one still running at turn end counts as running on. Module-local too. */
+  const running = new Set<ToolRun>()
   const history: History = {}
   /** showMemoryAndPlans takes memory and plans back out of what hideClaudeFiles hides. */
   const hidden: Hidden = options.hideClaudeFiles === false ? 'none' : options.showMemoryAndPlans === true ? 'temp' : 'all'
@@ -501,7 +529,8 @@ export const register: Register = (on, options) => {
     // a turn runs under the session's id: it is live, even had a session.end named it (a resume that failed)
     history.ended = undefined
     const turn = await update($, turns, n => n + 1)
-    await update($, recording, () => ({ turnId: e.turnId, turn, prompt: promptLine(e.text), keys: [] }))
+    const startedAt = await $.clock.now()
+    await update($, recording, () => ({ turnId: e.turnId, turn, prompt: promptLine(e.text), startedAt, keys: [] }))
     const repo = await read($, vcs)
     // Not awaited: a Plastic status takes seconds, so it runs while the model starts, and each tool call waits for it.
     if (repo !== null) snapshotting = snapshotStart($, repo, e.turnId).catch(() => undefined)
@@ -517,8 +546,19 @@ export const register: Register = (on, options) => {
         rec === null ? rec : { ...rec, hasShellRun: true, ...(isCmBusy ? { isCmBusy } : {}) },
       )
     }
-    return next(e)
-  }).catch(($, e, next) => next(e)) // only throws before next(e): never blocks a tool
+    const call = { from: await $.clock.now() }
+    running.add(call)
+    const ran = await next(e).finally(() => running.delete(call))
+    // read-only: Read, Grep, a Bash `ls`, a subagent's launch (its own calls are timed); no PowerShell command yet
+    if (ran.deny !== undefined || ran.isReadOnly === true) return ran
+    // one moved to the background (asked, Ctrl+B, a timeout) counts as running to the turn's end
+    const isBackground = (ran.result as { backgroundTaskId?: string } | undefined)?.backgroundTaskId !== undefined
+    const to = isBackground ? undefined : await $.clock.now()
+    await update($, recording, rec =>
+      rec === null ? rec : { ...rec, runs: [...(rec.runs ?? []), { ...call, ...(to === undefined ? {} : { to }) }] },
+    )
+    return ran
+  }).catch(($, e, next) => next(e)) // never blocks a tool, nor runs one twice: past next(e) it replays its result
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
     await snapshotting
@@ -537,7 +577,7 @@ export const register: Register = (on, options) => {
     const removed = lines.filter(line => line.startsWith('-')).length
     await update($, { ...PENDING, id }, held =>
       held?.turnId === open.turnId
-        ? { ...held, added: held.added + added, removed: held.removed + removed }
+        ? { ...held, added: held.added + added, removed: held.removed + removed, isEdited: true }
         : {
             turnId: open.turnId,
             path,
@@ -545,6 +585,7 @@ export const register: Register = (on, options) => {
             isNew: before === null,
             added,
             removed,
+            isEdited: true,
             ...(open.hasShellRun === true ? { isAfterShell: true } : {}),
           },
     )
@@ -581,13 +622,17 @@ export const register: Register = (on, options) => {
       for (const [id, file] of await shellFiles($, repo, open, touched, notes)) touched.set(id, file)
     }
     const roots = touched.size === 0 ? [] : await claudeOwn($, cwd, hidden)
+    // a call still running (a background agent's) counts as running on
+    const runs = [...(open.runs ?? []), ...running]
     const files: FileDiff[] = []
     for (const held of touched.values()) {
       // a scratchpad file, a commit message Claude wrote down: not the turn's work
       if (isClaudeOwn(roots, cwd, held.path)) continue
+      const now = await $.fs.stat(held.path).catch(() => undefined)
       // a file recorded by size and mtime is unchanged while both are
-      const now = held.stamp === undefined ? undefined : await $.fs.stat(held.path).catch(() => undefined)
-      if (now !== undefined && now.size === held.stamp!.size && now.mtimeMs === held.stamp!.mtimeMs) continue
+      if (held.stamp !== undefined && now?.size === held.stamp.size && now.mtimeMs === held.stamp.mtimeMs) continue
+      // one only the status lists, written while none of the turn's calls ran: another session's, an editor's
+      if (held.isEdited !== true && !(await isTurnWrite($, open.startedAt, runs, held.path, now?.mtimeMs))) continue
       const after = await snapshot($, held.path)
       const file = diffFile({ ...held, path: clean(relativePath(cwd, held.path)), after })
       if (file !== null) files.push(file)

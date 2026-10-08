@@ -83,6 +83,14 @@ against its turn-start content and drops out if the turn didn't change it.
 - A failed status (not logged in, a server error) means no shell files for that turn and a note, never
   "no changes".
 
+A file the status lists but no `Edit`, `Write` or `NotebookEdit` call of the turn changed counts as the turn's only
+when one of its tool calls was running as the file was last written, by its mtime, give or take 2 s. A call the engine
+reports read-only doesn't count (`Read`, `Grep`, a Bash `ls`, a subagent's launch, whose own calls do; no PowerShell
+command yet), nor one a hook denies. A call still running at turn end, or moved to the background, counts as running
+to the turn's end. A deleted file, or one that kept a date from before the turn (a copy, a move), goes by its folder's
+mtime, which changes as an entry comes or goes. So what another session in the same repository or workspace writes,
+or an editor, between the turn's calls stays out.
+
 ## Load it
 
 Terminal, for one session:
@@ -173,7 +181,15 @@ git; the engine rewrites it on every load).
 - Shell changes are seen only inside the git repository or Plastic workspace the session started in, and
   not in files it ignores (`.gitignore`, Plastic's `ignore.conf`). Outside both, only `Edit`, `Write` and
   `NotebookEdit` calls are seen.
-- Anything that changes a file during a turn counts as the turn's, your own editor included.
+- Another session's writes, or your editor's, count as the turn's when they land while one of the turn's calls
+  runs (a long build, a background server, a question or a permission prompt waiting for you: a call is timed from
+  before its prompt, and one you refuse still counts), when they land in a file the turn's `Edit`, `Write` or
+  `NotebookEdit` calls changed, or as a deletion or a dated copy in a folder whose entries one of the turn's calls
+  changed. The other way round, a change the turn made through the shell drops out when something else writes the
+  file later in the turn, when a process a command left running (`Start-Process`, `&`) writes after the command
+  returned, when a deletion or dated copy shares its folder with something added or removed later, when a dated copy
+  replaces a file already there, or when the file system's clock is more than 2 s off (a network share). A background
+  command still writing in a later turn shows there only what lands during one of that turn's calls.
 - Snapshot caps: content is recorded for files dirty at turn start up to 16 MiB in all; past that (or past
   2 MiB, or binary) a file is recorded by size and mtime and shows without hunks if those change. Past
   1,000 dirty files the rest are left out. At turn end at most 1,000 newly listed files are shown, with a
@@ -187,7 +203,7 @@ git; the engine rewrites it on every load).
   out `--localmoved`, a slow similarity search.
 - Gluon (partial) Plastic workspaces are neither handled nor tested.
 - A status slower than about 10 s at turn start can outlast the first tool call's hook budget; that tool
-  then runs before the snapshot ends.
+  then runs before the snapshot ends, untimed, so what it writes through the shell may not show.
 - Only the last turn is recorded live. Older turns are rebuilt from the transcript when picked, and show only
   `Edit`, `Write` and `NotebookEdit` calls of the main conversation: no shell changes, no subagent edits, and no
   line-ending changes (the tools hand back `originalFile` with LF). A turn that changed a file and changed it back

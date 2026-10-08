@@ -49,17 +49,24 @@ export type Baseline = {
   dirty: string[]
 }
 
+/** When a call of the turn ran that may have written files, in ms since the epoch; `to` absent for one in the background. */
+export type ToolRun = { from: number; to?: number }
+
 /** The main turn being recorded: its id and number, its prompt, and the files touched so far. */
 export type Recording = {
   turnId: string
   turn: number
   prompt: string
+  /** When the turn started, in ms since the epoch; absent in a turn recorded before calls were timed. */
+  startedAt?: number
   /** `pending` ids, one per file. */
   keys: string[]
   /** The turn-start status; absent with no version control, or while or when the snapshot failed. */
   base?: Baseline
   /** Set once a Bash or PowerShell command runs in the turn. */
   hasShellRun?: boolean
+  /** The turn's calls that ran and were not read-only (a subagent's launch is: its own calls count), once one has. */
+  runs?: ToolRun[]
   /** Set when a Bash or PowerShell command in the turn ran `cm update`, `switch` or `merge`. */
   isCmBusy?: boolean
   notes?: string[]
@@ -80,6 +87,8 @@ export type PendingFile = {
   isBinary?: boolean
   /** First edited after a shell command ran, so its before may already hold the shell's change. */
   isAfterShell?: boolean
+  /** Changed by an Edit, Write or NotebookEdit call of the turn; else only the status lists it. */
+  isEdited?: boolean
 }
 
 declare module 'claude-code' {

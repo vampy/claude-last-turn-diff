@@ -33,7 +33,7 @@ const BAND = {
 } as const
 
 /** What a shell command in a test does to the disk. */
-type Shell = { put: (path: string, text: string) => void; del: (path: string) => void }
+type Shell = { put: (path: string, text: string) => void; del: (path: string) => void; mv: (from: string, to: string) => void }
 
 type WorldOptions = {
   lies?: Record<string, 'deny' | 'error' | 'staged'>
@@ -44,6 +44,8 @@ type WorldOptions = {
   base?: Record<string, string>
   /** Bash and PowerShell commands by their text. `git commit…` also commits the disk, `cm ci…` checks it in. */
   shell?: Record<string, (fs: Shell) => void>
+  /** Commands answered as read-only, as Bash's own check finds `ls`. */
+  readOnly?: string[]
   /** Plastic moves by new path: an `MV` and a `CH` record while the new path is on disk. */
   moves?: Record<string, string>
   /** Paths Plastic's RevisionType calls binary. */
@@ -81,7 +83,7 @@ const xmlText = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt
 function world(
   on: On,
   files: Record<string, string>,
-  { lies = {}, unplaced, vcs, base = files, shell = {}, moves = {}, binaries = [], isStatusBroken, isTranscriptBroken, transcript = [], onStatus, env = {}, cwd = CWD, links = {} }: WorldOptions = {},
+  { lies = {}, unplaced, vcs, base = files, shell = {}, readOnly = [], moves = {}, binaries = [], isStatusBroken, isTranscriptBroken, transcript = [], onStatus, env = {}, cwd = CWD, links = {} }: WorldOptions = {},
 ) {
   const rows = [...transcript]
   let reads = 0
@@ -118,13 +120,32 @@ function world(
   const lied = new Map(Object.entries(lies).map(([path, outcome]) => [norm(path), outcome]))
   const panes = new Set<string>()
   const calls: string[][] = []
-  /** Bumped on each write a tool or command makes, as an mtime is. */
+  /**
+   * Each write a tool or command makes, or a test's own `put`, stamps the file's mtime from the clock, which it and each
+   * `$.clock.now()` move 10 s on; a file coming or going stamps its folder's in `folders`. Never written, 0.
+   */
   const mtimes = new Map<string, number>()
+  const folders = new Map<string, number>()
   let clock = 0
+  const folderOf = (key: string) => key.replace(/\/[^/]*$/, '')
   const put = (path: string, text: string) => {
+    const isNew = !disk.has(norm(path))
     disk.set(norm(path), text)
-    mtimes.set(norm(path), ++clock)
+    mtimes.set(norm(path), (clock += 10_000))
+    if (isNew) folders.set(folderOf(norm(path)), clock)
   }
+  const del = (path: string) => {
+    disk.delete(norm(path))
+    folders.set(folderOf(norm(path)), (clock += 10_000))
+  }
+  /** Keeps the file's mtime, as a rename does. */
+  const mv = (from: string, to: string) => {
+    disk.set(norm(to), disk.get(norm(from))!)
+    mtimes.set(norm(to), mtimes.get(norm(from)) ?? 0)
+    del(from)
+    folders.set(folderOf(norm(to)), clock)
+  }
+  on('clock.now', () => ({ value: (clock += 10_000) }))
   // git commits (h1, h2…) or Plastic changesets (7, 8…), each a tree of keys under ROOT; `head` is HEAD or the loaded one
   const tree = (from: ReadonlyMap<string, string>) => new Map([...from].filter(([key]) => key.startsWith(ROOT)))
   let head = vcs === 'cm' ? '7' : 'h1'
@@ -221,8 +242,8 @@ function world(
     parents.set(name, head)
     head = name
   }
-  const run = (command: string) => {
-    shell[command]?.({ put, del: path => disk.delete(norm(path)) })
+  const run = (command: string, isBackground = false) => {
+    shell[command]?.({ put, del, mv })
     if (command.startsWith('git commit')) commit(`h${revs.size + 1}`)
     if (command.startsWith('cm ci')) commit(String(Number(head) + 1))
     // a branch of its own: no ancestor of HEAD
@@ -230,10 +251,14 @@ function world(
       revs.set('side', tree(disk))
       head = 'side'
     }
-    return { result: { stdout: '', stderr: '', interrupted: false }, text: '' }
+    return {
+      result: { stdout: '', stderr: '', interrupted: false, ...(isBackground ? { backgroundTaskId: 'b1' } : {}) },
+      text: '',
+      ...(readOnly.includes(command) ? { isReadOnly: true as const } : {}),
+    }
   }
-  on('tool.call', { tool: 'Bash' }, ($, e) => record('Bash', { command: e.command }, run(e.command)))
-  on('tool.call', { tool: 'PowerShell' }, ($, e) => record('PowerShell', { command: e.command }, run(e.command)))
+  on('tool.call', { tool: 'Bash' }, ($, e) => record('Bash', { command: e.command }, run(e.command, e.run_in_background)))
+  on('tool.call', { tool: 'PowerShell' }, ($, e) => record('PowerShell', { command: e.command }, run(e.command, e.run_in_background)))
   on('env.get', ($, e) => ({ value: ({ TEMP: 'C:\\Users\\me\\AppData\\Local\\Temp', ...env } as Record<string, string>)[e.name] }))
   on('session.id', () => ({ value: sessionId }))
   on('fs.write', ($, e) => {
@@ -246,10 +271,11 @@ function world(
     if (link !== undefined) {
       return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: true, ...(e.resolve ? { realPath: link[1] } : {}) } }
     }
-    const text = disk.get(norm(e.path))
-    return text === undefined
-      ? { deny: 'ENOENT' }
-      : { value: { kind: 'file', size: text.length, mtimeMs: mtimes.get(norm(e.path)) ?? 0, isLink: false } }
+    const key = norm(e.path)
+    const text = disk.get(key)
+    if (text !== undefined) return { value: { kind: 'file', size: text.length, mtimeMs: mtimes.get(key) ?? 0, isLink: false } }
+    const isFolder = folders.has(key) || [...disk.keys()].some(file => file.startsWith(`${key}/`))
+    return isFolder ? { value: { kind: 'dir', size: 0, mtimeMs: folders.get(key) ?? 0, isLink: false } } : { deny: 'ENOENT' }
   })
   on('fs.read', ($, e) => {
     const text = disk.get(norm(e.path))
@@ -332,7 +358,7 @@ function world(
       },
     )
   })
-  return { disk, panes, calls, rows, swap, reads: () => reads }
+  return { disk, put, del, mv, panes, calls, rows, swap, reads: () => reads }
 }
 
 const start = ($: Engine, turnId: string, text = 'Fix the thing\nwith details') => $.turn.start({ text, turnId })
@@ -824,6 +850,84 @@ for (const kind of ['git', 'cm'] as const) {
       const { rows, codes } = await pane($, 'desktop')
       expect(rows).toEqual(['big.txt  +0 −0  too large', 'dirty.bin  +0 −0  binary', 'clean.bin  +0 −0  binary'])
       expect(codes).toEqual([])
+    })
+
+    test("files another session changes while none of the turn's calls runs are not the turn's", async ($, on) => {
+      const files = { [at('mine.txt')]: 'a\n', [at('theirs.txt')]: 'b\n', [at('dirty.txt')]: 'c\n', [at('gone.txt')]: 'd\n', [at('old.txt')]: 'o\n' }
+      const { put, del, mv } = world(on, files, {
+        vcs: kind,
+        base: { ...files, [at('dirty.txt')]: 'base\n' },
+        shell: { fix: fs => fs.put(at('mine.txt'), 'A\n'), look: () => undefined, ls: fs => fs.put(at('theirs.txt'), 'BB\n') },
+        readOnly: ['ls'],
+      })
+      await begin($)
+      // each write of another session's comes after a call, which waits for the turn-start status
+      await start($, 't1')
+      await bash($, 'fix')
+      // between the commands to a clean file, and a move keeping its date; after them to a file dirty at turn start
+      put(at('theirs.txt'), 'B\n')
+      mv(at('old.txt'), at('moved.txt'))
+      await bash($, 'look')
+      put(at('dirty.txt'), 'C\n')
+      await complete($, 't1')
+      expect((await pane($, 'terminal')).rows).toEqual(['mine.txt  +1 −1'])
+      // nor while a read-only command runs, nor a deletion; a file the turn edited shows, whoever writes it after
+      await start($, 't2', 'Edit it')
+      await edit($, 'mine.txt', 'A', 'a')
+      await bash($, 'ls')
+      del(at('gone.txt'))
+      put(at('mine.txt'), 'a\nx\n')
+      await complete($, 't2')
+      expect((await pane($, 'terminal')).header).toBe('T2 · 1 file · +2 −1  Edit it')
+      // a background command runs on past its call: what changes after it, to the turn's end, may be its
+      await start($, 't3', 'Serve it')
+      await $.tool.call({ tool: 'Bash', command: 'look', run_in_background: true })
+      put(at('mine.txt'), 'AA\n')
+      await complete($, 't3')
+      expect((await pane($, 'terminal')).header).toBe('T3 · 1 file · +1 −2  Serve it')
+    })
+
+    test("a moved file keeps its date: it counts by the call that wrote it last, or else by its folder's date", async ($, on) => {
+      world(
+        on,
+        { [at('a.txt')]: 'a\n', [at('old.txt')]: 'old\n' },
+        { vcs: kind, shell: { 'mv both': fs => (fs.mv(at('a.txt'), at('b.txt')), fs.mv(at('old.txt'), at('new.txt'))) } },
+      )
+      await begin($)
+      await start($, 't1')
+      await edit($, 'a.txt', 'a', 'A')
+      await bash($, 'mv both')
+      await complete($, 't1')
+      expect((await pane($, 'terminal')).rows).toEqual([
+        'a.txt  +0 −1  deleted',
+        'b.txt  +1 −0  new',
+        'new.txt  +1 −0  new',
+        'old.txt  +0 −1  deleted',
+      ])
+    })
+
+    test("a call still running at turn end (a background agent's): what it wrote by then shows", async ($, on) => {
+      let release!: () => void
+      const held = new Promise<void>(resolve => (release = resolve))
+      let wrote!: () => void
+      const written = new Promise<void>(resolve => (wrote = resolve))
+      // before the world's: a build that writes, then runs on past the turn's end
+      on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
+        if (e.command !== 'build') return next(e)
+        put(at('out.txt'), 'built\n')
+        wrote()
+        await held
+        return { result: { stdout: '', stderr: '', interrupted: false }, text: '' }
+      })
+      const { put } = world(on, { [at('out.txt')]: 'old\n' }, { vcs: kind })
+      await begin($)
+      await start($, 't1')
+      const building = bash($, 'build')
+      await written
+      await complete($, 't1')
+      release()
+      await building
+      expect((await pane($, 'terminal')).rows).toEqual(['out.txt  +1 −1'])
     })
 
     test('shellEdits off runs no process at all', { options: { shellEdits: false } }, async ($, on) => {
