@@ -2,8 +2,12 @@ import type { FileDiff, Hunk } from '../types'
 
 /** Context lines around each change. */
 const CONTEXT = 3
-/** Past this many LCS cells the changed middle shows as one delete block and one insert block. */
+/** Past this many LCS cells the changed middle goes to a Myers diff instead. */
 export const MAX_CELLS = 2_000_000
+/** Past this many changed lines (added and removed) Myers gives up: one delete block and one insert block. */
+export const MAX_EDITS = 4_000
+/** Past this many steps (diagonals tried, lines matched along them) Myers gives up too: about 0.2 s in the hook. */
+export const MAX_WORK = 10 * MAX_CELLS
 /** Files larger than this (bytes on disk, characters in memory) are not diffed. */
 export const MAX_SIZE = 2 * 1024 * 1024
 /** What one `Code` source may hold. */
@@ -34,7 +38,62 @@ export function eolStyle(text: string): 'CRLF' | 'LF' | 'mixed' | 'none' {
   return lf === 0 ? 'none' : crlf === 0 ? 'LF' : crlf === lf ? 'CRLF' : 'mixed'
 }
 
-/** A line diff: the common prefix and suffix trimmed, then an LCS over the middle. */
+/**
+ * The [i, j] pairs of the lines x and y keep in a shortest diff, in order; null past MAX_EDITS changed lines or
+ * MAX_WORK steps. Myers' greedy walk costs about n + m + D² for D changed lines, so edits far apart in a large file
+ * cost little, but lines that match along many diagonals (a file of repeated lines) can take it to (n + m)·D.
+ */
+export function myers(x: ArrayLike<number>, y: ArrayLike<number>): [number, number][] | null {
+  const n = x.length
+  const m = y.length
+  let work = 0
+  // furthest[off + k]: how far into x a walk with the changes so far reaches on diagonal k = i - j
+  const off = MAX_EDITS + 1
+  const furthest = new Int32Array(2 * off + 1)
+  // trace[d][(k + d) / 2]: furthest[off + k] after d changes, k from -d to d in steps of 2
+  // ponytail: the trace holds about MAX_EDITS²/2 numbers (32 MB); Myers' linear-space variant if MAX_EDITS must grow
+  const trace: Int32Array[] = []
+  for (let d = 0; d <= MAX_EDITS; d++) {
+    const row = new Int32Array(d + 1)
+    for (let k = -d; k <= d; k += 2) {
+      // from diagonal k + 1 with an added line, or from k - 1 with a removed one, whichever reached further
+      const isAdd = k === -d || (k !== d && furthest[off + k - 1]! < furthest[off + k + 1]!)
+      let i = isAdd ? furthest[off + k + 1]! : furthest[off + k - 1]! + 1
+      let j = i - k
+      const at = i
+      while (i < n && j < m && x[i] === y[j]) {
+        i++
+        j++
+      }
+      work += 1 + i - at
+      furthest[off + k] = i
+      row[(k + d) >> 1] = i
+      if (i >= n && j >= m) {
+        // back from the end: each change came from diagonal k ± 1 one change before, then matched lines to here
+        const same: [number, number][] = []
+        i = n
+        j = m
+        for (let e = d; e > 0; e--) {
+          const was = trace[e - 1]!
+          const kk = i - j
+          const wasAdd = kk === -e || (kk !== e && was[(kk + e - 2) >> 1]! < was[(kk + e) >> 1]!)
+          const from = wasAdd ? kk + 1 : kk - 1
+          const fromI = was[(from + e - 1) >> 1]!
+          while (i > (wasAdd ? fromI : fromI + 1)) same.push([--i, --j])
+          i = fromI
+          j = fromI - from
+        }
+        while (i > 0) same.push([--i, --j])
+        return same.reverse()
+      }
+      if (work > MAX_WORK) return null
+    }
+    trace.push(row)
+  }
+  return null
+}
+
+/** A line diff: the common prefix and suffix trimmed, then an LCS over the middle, or Myers past MAX_CELLS. */
 export function diffLines(a: readonly string[], b: readonly string[]): Op[] {
   let start = 0
   while (start < a.length && start < b.length && a[start] === b[start]) start++
@@ -47,19 +106,34 @@ export function diffLines(a: readonly string[], b: readonly string[]): Op[] {
   const ops: Op[] = a.slice(0, start).map(line => [' ', line] as const)
   const n = endA - start
   const m = endB - start
-  if (n * m > MAX_CELLS) {
-    // ponytail: no LCS past MAX_CELLS (the hook's 10 s budget); a smarter diff (Myers) if this shows up often
-    for (const line of a.slice(start, endA)) ops.push(['-', line])
-    for (const line of b.slice(start, endB)) ops.push(['+', line])
-  } else {
+  /** The middle's lines as numbers, equal lines alike, so comparing two costs the same whatever their length. */
+  const numbers = (): [Int32Array, Int32Array] => {
     const ids = new Map<string, number>()
     const id = (line: string) => {
       let value = ids.get(line)
       if (value === undefined) ids.set(line, (value = ids.size))
       return value
     }
-    const x = Int32Array.from(a.slice(start, endA), id)
-    const y = Int32Array.from(b.slice(start, endB), id)
+    return [Int32Array.from(a.slice(start, endA), id), Int32Array.from(b.slice(start, endB), id)]
+  }
+  if (n * m > MAX_CELLS) {
+    // the lines between two matches as removed, then added; with nothing matched, one delete block and one insert block.
+    // A diff changes at least |n - m| lines, so past MAX_EDITS of them Myers isn't even tried.
+    const same = (Math.abs(n - m) > MAX_EDITS ? null : myers(...numbers())) ?? []
+    same.push([n, m])
+    let i = 0
+    let j = 0
+    for (const [toI, toJ] of same) {
+      while (i < toI) ops.push(['-', a[start + i++]!])
+      while (j < toJ) ops.push(['+', b[start + j++]!])
+      // [n, m] only marks the end
+      if (i < n) {
+        ops.push([' ', a[start + i++]!])
+        j++
+      }
+    }
+  } else {
+    const [x, y] = numbers()
     // lcs[i * w + j]: the LCS length of x[i..] and y[j..]
     const w = m + 1
     const lcs = new Uint32Array((n + 1) * w)

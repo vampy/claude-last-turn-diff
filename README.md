@@ -33,8 +33,9 @@ before-contents live in `$.state`, so a hot reload mid-turn loses nothing.
 
 The main loop's `turn.complete` closes the turn (a subagent's carries `agentId` and is ignored); interrupted
 turns count too. The mod reads every touched file again and diffs before against now in `hooks/diff.ts`:
-lines with a trailing `\r` stripped, the common prefix and suffix trimmed, an LCS over the middle, and
-unified hunks with 3 lines of context. Only the finished last turn is recorded; older ones are rebuilt when picked.
+lines with a trailing `\r` stripped, the common prefix and suffix trimmed, an LCS over the middle (a Myers diff
+when the middle passes 2M LCS cells: edits far apart in a large file), and unified hunks with 3 lines of context.
+Only the finished last turn is recorded; older ones are rebuilt when picked.
 
 ### Turn picker
 
@@ -230,8 +231,10 @@ git; the engine rewrites it on every load).
   do too.
 - Files over 2 MiB show as "too large to diff", with counts from the tools' `structuredPatch` where it has
   any.
-- Past 2M LCS cells, a file's changed middle shows as one delete block and one insert block. Each file
-  shows at most about 60,000 characters of diff, and the rest is counted in a note.
+- Past 2M LCS cells, a file's changed middle (from its first changed line to its last) shows as one delete block and
+  one insert block when it has more than 4,000 changed lines (added and removed: a moved section counts twice), or
+  when its lines repeat so much that the diff passes 20M steps. Each file shows at most about 60,000 characters of
+  diff, and the rest is counted in a note.
 - Desktop (app 2.26454) draws no mod UI for a session shown in the second half of a split view: no
   pane, no band, though `/turn-diff` still answers. Show the session on its own to see them.
 - Desktop: code isn't selectable, long lines wrap, and nothing scrolls inside a pane on its own. Desktop

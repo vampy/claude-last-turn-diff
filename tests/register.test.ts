@@ -434,6 +434,17 @@ describe('recording', () => {
     }
   })
 
+  test('Edits near the start and the end of a 3,000-line CRLF file show as two hunks, not every line between', async ($, on) => {
+    world(on, { 'C:\\proj\\big.md': Array.from({ length: 3071 }, (_, i) => `line ${i + 1}\r\n`).join('') })
+    await start($, 't1')
+    await edit($, 'big.md', 'line 53\r\n', 'LINE 53\r\n')
+    await edit($, 'big.md', 'line 3063\r\n', 'LINE 3063\r\n')
+    await complete($, 't1')
+    const { header, codes } = await pane($, 'terminal')
+    expect(header).toBe('T1 · 1 file · +2 −2  Fix the thing')
+    expect(codes.map(code => code.source.match(/^@@ .* @@$/gm))).toEqual([['@@ -50,7 +50,7 @@', '@@ -3060,7 +3060,7 @@']])
+  })
+
   test('a new file, a deleted one and a rewrite in one turn', async ($, on) => {
     const { disk } = world(on, { 'C:\\proj\\gone.txt': 'bye\n', 'C:\\proj\\b.txt': 'b\r\n' })
     await start($, 't1')
@@ -753,6 +764,19 @@ for (const kind of ['git', 'cm'] as const) {
       expect(texts).toContain('@@ -1,2 +1,2 @@')
       const lines = kind === 'git' ? ['1   one', '2 - two', '2 + TWO'] : ['1   Done ✅', '2 - next', '2 + next ✅']
       expect(svgs.map(svg => svgRows(svg.source))).toEqual([lines])
+    })
+
+    test('a shell edit near the start and the end of a 3,000-line file shows two hunks, not every line between', async ($, on) => {
+      const was = Array.from({ length: 3071 }, (_, i) => `line ${i + 1}\n`).join('')
+      const now = was.replace('line 53\n', 'LINE 53\n').replace('line 3063\n', 'LINE 3063\n')
+      world(on, { [at('big.md')]: was }, { vcs: kind, shell: { fix: fs => fs.put(at('big.md'), now) } })
+      await begin($)
+      await start($, 't1')
+      await bash($, 'fix')
+      await complete($, 't1')
+      const { header, codes } = await pane($, 'terminal')
+      expect(header).toBe('T1 · 1 file · +2 −2  Fix the thing')
+      expect(codes.map(code => code.source.match(/^@@ .* @@$/gm))).toEqual([['@@ -50,7 +50,7 @@', '@@ -3060,7 +3060,7 @@']])
     })
 
     test('a file dirty at turn start diffs against its turn-start content; untouched ones do not show', async ($, on) => {

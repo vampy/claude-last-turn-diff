@@ -158,6 +158,17 @@ describe('rebuildFiles', () => {
     expect(blocks(rebuild(edit(A, text, 'two', 'TWO'))[0]!.hunks)).toEqual(['@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three'])
   })
 
+  test('Edits near the start and the end of a 3,000-line file show as two hunks, not every line between', () => {
+    const text = numbered(3071)
+    const mid = text.replace('line 53\n', 'LINE 53\n')
+    const [file] = rebuild(edit(A, text, 'line 53\n', 'LINE 53\n'), edit(A, mid, 'line 3063\n', 'LINE 3063\n'))
+    expect([file?.added, file?.removed]).toEqual([2, 2])
+    expect(file?.hunks.map(h => [h.oldStart, h.oldLines, h.newStart, h.newLines])).toEqual([
+      [50, 7, 50, 7],
+      [3060, 7, 3060, 7],
+    ])
+  })
+
   test('several calls on one file show as one net diff, files in the order first touched', () => {
     const files = rebuild(
       edit('C:\\proj\\src\\b.ts', 'b\n', 'b', 'B'),
