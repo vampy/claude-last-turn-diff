@@ -696,14 +696,17 @@ describe('band and command', () => {
     await $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true })
     expect(await turnDiff()).toMatchObject({ text: 'No finished turn has changed files yet.' })
     expect([...panes]).toEqual(['last-turn-diff'])
+    // the engine draws the pane it placed
+    await (await mountPane($, 'terminal')).unmount()
     expect(await turnDiff()).toMatchObject({ text: 'Closed the last-turn diff.' })
     expect([...panes]).toEqual([])
     await start($, 't1')
     await edit($, 'a.txt', 'a', 'A')
     await complete($, 't1')
     expect(await turnDiff()).toMatchObject({ text: 'T1 · 1 file · +1 −1: a.txt' })
+    await (await mountPane($, 'terminal')).unmount()
     // slash commands between turns start no turn: the next one is T2
-    await turnDiff()
+    expect(await turnDiff()).toMatchObject({ text: 'Closed the last-turn diff.' })
     await start($, 't2')
     await edit($, 'a.txt', 'A', 'a')
     await complete($, 't2')
@@ -730,6 +733,34 @@ describe('band and command', () => {
     await start($, 't2', 'Just a question')
     await complete($, 't2')
     expect([...panes]).toEqual([])
+  })
+
+  // Claude Code's diff panel (/diff) takes the dock's place in the terminal's fullscreen layout: the pane stays open and
+  // shown, but nothing draws it until /diff hides the panel
+  test("a pane behind Claude Code's diff panel stays open: /turn-diff and View say how to show it", async ($, on) => {
+    const { panes } = world(on, { [at('a.txt')]: 'a\n' })
+    const toasts: string[] = []
+    on('ui.toast', ($, e) => (toasts.push(e.text), { value: undefined }))
+    await start($, 't1')
+    await edit($, 'a.txt', 'a', 'A')
+    await complete($, 't1')
+    // opened by autoOpen, never drawn
+    expect(await $.command.run(RUN)).toMatchObject({ text: `T1 · 1 file · +1 −1: a.txt (behind Claude Code's diff panel: /diff hides it)` })
+    expect([...panes]).toEqual(['last-turn-diff'])
+    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', ...BAND })
+    await band.press({ key: 'view' })
+    expect(toasts).toEqual(["The Last turn pane is behind Claude Code's diff panel: /diff hides it."])
+    await band.unmount()
+    // /diff hides the panel: the pane draws, and /turn-diff closes it
+    await (await mountPane($, 'terminal')).unmount()
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'Closed the last-turn diff.' })
+    // a new turn behind the panel: drawn for the last one is not drawn for this one
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'T1 · 1 file · +1 −1: a.txt' })
+    await (await mountPane($, 'terminal')).unmount()
+    await start($, 't2')
+    await edit($, 'a.txt', 'A', 'a')
+    await complete($, 't2')
+    expect(await $.command.run(RUN)).toMatchObject({ text: `T2 · 1 file · +1 −1: a.txt (behind Claude Code's diff panel: /diff hides it)` })
   })
 
   test('/turn-diff says why when no surface shows the pane', async ($, on) => {
@@ -1610,6 +1641,7 @@ describe('turn picker', () => {
     await start($, 't1', 'Still here')
     await edit($, 'a.txt', 'a', 'A')
     await complete($, 't1')
+    await (await mountPane($, 'terminal')).unmount()
     expect(await $.command.run(RUN)).toMatchObject({ text: 'Closed the last-turn diff.' })
     expect(await $.command.run(RUN)).toMatchObject({ text: 'T1 · 1 file · +1 −1: a.txt' })
     expect((await pane($, 'desktop')).header).toBe('T1 · 1 file · +1 −1  Still here')

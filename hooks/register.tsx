@@ -325,6 +325,8 @@ const totals = (files: readonly FileDiff[]) => ({
 
 /** What the pane says with no turn to show. */
 const NO_TURN = 'No finished turn has changed files yet.'
+/** Where an open pane that does not draw is: Claude Code's own diff panel takes the dock's place and draws none. */
+const COVERED = "behind Claude Code's diff panel: /diff hides it"
 
 function describe(turn: Shown | null): string {
   if (turn === null) return NO_TURN
@@ -473,6 +475,12 @@ function withHidden(notes: readonly string[], hidden: number): readonly string[]
   return [...notes.filter(note => note !== cut), `${hidden + (cut === undefined ? 0 : parseInt(cut))}${MORE}`]
 }
 
+/** The pane closed (or behind another tab), drawn, or open but behind Claude Code's diff panel: shown, not drawn. */
+async function sight($: EngineInterface, isDrawn: boolean): Promise<'closed' | 'drawn' | 'covered'> {
+  if (!(await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)) return 'closed'
+  return isDrawn ? 'drawn' : 'covered'
+}
+
 /** The path cut from the left to fit `room` cells. */
 const fit = (path: string, room: number) => (path.length > room ? `…${path.slice(-(Math.max(room, 10) - 1))}` : path)
 
@@ -482,6 +490,12 @@ export const register: Register = (on, options) => {
   /** The calls running now, by when each started: one still running at turn end counts as running on. Module-local too. */
   const running = new Set<ToolRun>()
   const history: History = {}
+  /**
+   * Whether the pane drew since it opened or its turn changed. A pane shown but not drawn is behind Claude Code's own
+   * diff panel (/diff, the terminal's fullscreen layout), which takes the dock's place: `$.ui.panes()` still calls the
+   * pane shown, an open draws nothing, and only /diff brings it back. Module-local: a reload draws a shown pane again.
+   */
+  let isDrawn = false
   /** showMemoryAndPlans takes memory and plans back out of what hideClaudeFiles hides. */
   const hidden: Hidden = options.hideClaudeFiles === false ? 'none' : options.showMemoryAndPlans === true ? 'temp' : 'all'
 
@@ -523,16 +537,19 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'turn-diff' }, async $ => {
-    // close only what is on screen: an open pane left unplaced, or behind another tab, opens again
-    if ((await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)) {
+    const seen = await sight($, isDrawn)
+    // close only what is on screen: an open pane left unplaced, behind another tab or behind the diff panel stays
+    if (seen === 'drawn') {
       await $.ui.close({ id: PANE })
       return { text: 'Closed the last-turn diff.' }
     }
     await update($, picked, () => null)
     await update($, page, () => 0)
+    if (seen === 'closed') isDrawn = false
     const opened = await $.ui.open({ id: PANE, title: TITLE })
-    const unplaced = opened.isPlaced ? '' : ` (no pane shown: ${opened.reason})`
-    return { text: describe((await shown($, history, options.turnHistory !== false, hidden)).turn) + unplaced }
+    const why = !opened.isPlaced ? `no pane shown: ${opened.reason}` : seen === 'covered' ? COVERED : undefined
+    const turn = (await shown($, history, options.turnHistory !== false, hidden)).turn
+    return { text: describe(turn) + (why === undefined ? '' : ` (${why})`) }
   })
 
   // Only the main loop raises turn.start; a subagent's run and a local slash command do not.
@@ -660,6 +677,8 @@ export const register: Register = (on, options) => {
       await update($, isBandHidden, () => true)
       return next(e)
     }
+    // a shown pane draws the new turn; one behind the diff panel does not
+    isDrawn = false
     await update($, later, () => [])
     await update($, lastTurn, () => ({ turn: open.turn, prompt: open.prompt, files, notes }))
     await update($, isBandHidden, () => false)
@@ -672,6 +691,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface === 'mobile') return next(e)
+    isDrawn = true
     const { Box, Button, Code, Select, Text } = $.ui.resolve(e)
     const { turn, entries } = await shown($, history, options.turnHistory !== false, hidden)
     if (turn === null) return <Text dimColor>{NO_TURN}</Text>
@@ -841,6 +861,10 @@ export const register: Register = (on, options) => {
           onPress={async () => {
             await update($, picked, () => null)
             await update($, page, () => 0)
+            const seen = await sight($, isDrawn)
+            if (seen === 'covered') await $.ui.toast(`The Last turn pane is ${COVERED}.`)
+            if (seen !== 'closed') return
+            isDrawn = false
             await $.ui.open({ id: PANE, title: TITLE })
           }}
         />
