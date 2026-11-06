@@ -94,7 +94,10 @@ The pane after that turn, docked beside the transcript, with the band above the 
 
 ![The Last turn pane: the Turn picker, the header T2 · 4 files · +68 −14, a row per file, and the first file's hunk](docs/media/terminal.png)
 
-<!-- To add: docs/media/desktop.png, the pane in the Desktop Code tab with its image hunks and Copy buttons. -->
+The pane in the Desktop Code tab after a turn that adds a priority field, where each hunk is an image with line
+numbers, syntax colors and a Copy button:
+
+![The Last turn pane in the Desktop Code tab: the header T1 · 4 files · +38 −9 with the prompt, a row per file with test/cli.test.ts marked new, and the hunks of src/todo.ts and src/store.ts drawn as images with red and green lines, line numbers and Copy buttons](docs/media/desktop.png)
 
 - **Header**: the turn's number, file count and line counts, the prompt's first line, a note when shell changes
   could not be read, and a line saying so when the turn was rebuilt from the transcript.
@@ -394,5 +397,3 @@ To have every session reload the mod when its files change, add this next to `CL
 
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
-- **A Desktop screenshot**: the pane in the Desktop Code tab, with its image hunks and Copy buttons, in
-  `docs/media/desktop.png`, for [What you see](#what-you-see).
