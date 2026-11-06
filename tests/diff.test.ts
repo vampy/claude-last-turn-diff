@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { blocks, CODE_CAP, diffFile, diffLines, MAX_CELLS, MAX_EDITS, MAX_SIZE, myers, toHunks } from '../hooks/diff'
+import { blocks, CODE_CAP, diffFile, diffLines, MAX_CELLS, MAX_EDITS, MAX_SIZE, myers, runHunks, toHunks } from '../hooks/diff'
 import type { FileInput } from '../hooks/diff'
 import type { Hunk } from '../types'
 import { parseHunks } from './parse'
@@ -13,6 +13,29 @@ const numbered = (count: number, tag = 'line') =>
   Array.from({ length: count }, (_, i) => `${tag} ${i + 1}\n`).join('')
 
 describe('diff', () => {
+  test('runHunks numbers removed runs by the old file, the rest by the new, and caps runs and headers per file', () => {
+    const h: Hunk = { oldStart: 10, oldLines: 5, newStart: 20, newLines: 5, lines: [' a', '-b', '+B', '+C', ' c', ' d', '-e'] }
+    expect(runHunks([h])).toEqual({
+      hunks: [
+        {
+          header: '@@ -10,5 +20,5 @@',
+          runs: [
+            { kind: ' ', start: 20, lines: ['a'] },
+            { kind: '-', start: 11, lines: ['b'] },
+            { kind: '+', start: 21, lines: ['B', 'C'] },
+            { kind: ' ', start: 23, lines: ['c', 'd'] },
+            { kind: '-', start: 14, lines: ['e'] },
+          ],
+        },
+      ],
+      hidden: 0,
+    })
+    // a header and three runs fit: the rest of the hunk and all of the next are counted, changed lines only
+    const capped = runHunks([h, h], 4)
+    expect(capped.hunks.map(one => one.runs.map(run => run.kind))).toEqual([[' ', '-', '+']])
+    expect(capped.hidden).toBe(1 + 4)
+  })
+
   test('insert', () => {
     const diff = file('a\nb\nc\n', 'a\nb\nX\nc\n')
     expect(diff?.hunks).toEqual([

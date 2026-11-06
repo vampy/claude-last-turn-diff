@@ -620,6 +620,24 @@ describe('pane', () => {
     expect(await (await mountPane($, 'terminal')).findAll({ type: 'Button', text: 'Copy' })).toEqual([])
   })
 
+  test('with selectableDiffs desktop draws each run as numbered code, removed and added runs framed and marked', { options: { selectableDiffs: true, svgDiffs: true } }, async ($, on) => {
+    world(on, { 'C:\\proj\\a.ts': 'const a = 1\nconst b = 2\n' })
+    await start($, 't1')
+    await edit($, 'a.ts', 'a = 1', 'a = 10')
+    await complete($, 't1')
+    const ui = await mountPane($, 'desktop')
+    expect(await ui.findAll({ type: 'Svg' })).toEqual([])
+    expect((await ui.findAll({ type: 'Text' })).map(found => found.text)).toContain('@@ -1,2 +1,2 @@')
+    expect((await ui.findAll({ type: 'Code' })).map(({ props }) => [props.format, props.startLine, props.source])).toEqual([
+      [undefined, 1, '- const a = 1'],
+      [undefined, 1, '+ const a = 10'],
+      [undefined, 2, '  const b = 2'],
+    ])
+    expect((await ui.findAll({ type: 'Box' })).flatMap(({ props }) => props.borderColor ?? [])).toEqual(['error', 'success'])
+    // the terminal keeps its diff code blocks
+    expect((await (await mountPane($, 'terminal')).findAll({ type: 'Code' })).map(({ props }) => props.format)).toEqual(['diff'])
+  })
+
   test('with svgDiffs off desktop draws diff code blocks, as the terminal does', { options: { svgDiffs: false } }, async ($, on) => {
     world(on, { 'C:\\proj\\a.ts': 'const a = 1\n' })
     await start($, 't1')

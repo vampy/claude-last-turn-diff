@@ -105,7 +105,8 @@ numbers, syntax colors and a Copy button:
   line-ending change such as `CRLF→LF` (`EOL` when only the line endings moved). Pressing a row jumps to that
   file: its page always switches, and the pane scrolls to it where the surface supports that.
 - **Hunks**: in a terminal, `diff` code blocks. In the Desktop Code tab, images with red and green lines, line
-  numbers and syntax colors, each hunk under its `@@` line with a Copy button (see `svgDiffs`).
+  numbers and syntax colors, each hunk under its `@@` line with a Copy button (see `svgDiffs`), or selectable
+  numbered code blocks with removed and added lines framed (see `selectableDiffs`).
 - **Pages**: a large turn is split into pages with Prev and Next.
 - **Turn picker**: shown once more than one turn has changes. It lists the newest 64 turns that changed files,
   each with its prompt and the number of files it edited, and shows the last one by default.
@@ -156,6 +157,7 @@ two run side by side: when `/diff`'s panel covers the pane, typing `/diff` hides
 | `hideClaudeFiles` | on | Leaves out Claude Code's own temporary, memory and plan files. |
 | `showMemoryAndPlans` | off | With `hideClaudeFiles` on, shows Claude's memory and plan edits again. |
 | `svgDiffs` | on | In the Desktop Code tab, draws the hunks as images with line numbers and syntax colors. |
+| `selectableDiffs` | off | In the Desktop Code tab, draws the hunks as numbered code blocks you can select, removed and added lines marked and framed. |
 
 To change them in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
 `~/.claude/settings.json`, keeping only the options you change, and start a new session. Project settings are not
@@ -169,7 +171,7 @@ read for plugin options. The key `last-turn-diff@inline` works too; it is the on
       "shellEdits": false,
       "turnHistory": false,
       "showMemoryAndPlans": true,
-      "svgDiffs": false
+      "selectableDiffs": true
     }
   }
 }
@@ -198,11 +200,18 @@ More on each:
   still sees the files under its own cwd.
 - `showMemoryAndPlans`: its temporary files stay hidden. It is listed in `/config` only while `hideClaudeFiles` is
   on: off, nothing is hidden.
-- `svgDiffs`: Desktop (app 2.26454) draws a `Code` element's `format: 'diff'` as plain `diff` text, with no line
+- `svgDiffs`: Desktop (app 4.23118) draws a `Code` element's `format: 'diff'` as plain `diff` text, with no line
   numbers, line backgrounds or language colors, so the mod draws them itself. An image's text can't be selected, so
   each hunk has a Copy button that puts its lines as they are now (unchanged and added, no markers) on the
-  clipboard. Off, Desktop shows the plain `diff` code blocks the terminal gets. Turn it off if the images ever draw
-  wrong.
+  clipboard. Turn it off if the images ever draw wrong.
+- `selectableDiffs`: Desktop draws numbered code (a `Code` with a `startLine`) with its own highlighter, theme and
+  line numbers, and that text can be selected, unlike plain `diff` text and images. So each hunk shows under its
+  `@@` line as runs of numbered code: unchanged lines numbered as they are now, removed lines as they were, marked
+  `-` in a red frame, and added lines marked `+` in a green one. A mod can't put the marks in Desktop's gutter or
+  shade the lines, so the marks are part of the code and a copy takes them too. Each block has Desktop's own copy
+  button. It takes precedence over `svgDiffs`.
+
+  With both off, Desktop shows the plain `diff` code blocks the terminal gets.
 
 ## Notes and limitations
 
@@ -287,11 +296,13 @@ More on each:
 
 - Desktop (app 2.26454) draws no mod UI for a session shown in the second half of a split view: no
   pane, no band, though `/turn-diff` still answers. Show the session on its own to see them.
-- Code isn't selectable, long lines wrap, and nothing scrolls inside a pane on its own. Desktop refuses a draw
-  past 2,000 elements or 262,144 characters. Each code block holds at most 10,000 characters and each page about
-  90,000; with `svgDiffs` each file draws at most about 150,000 characters of SVG (roughly 800 to 2,000 lines, the
-  rest counted in a note) and each page about 160,000. A turn touching several hundred files could still go past
-  the limit.
+- Only `selectableDiffs`' numbered code can be selected; plain `diff` code blocks, other text and images can't.
+  Long lines wrap, and nothing scrolls inside a pane on its own. Desktop refuses a draw past 2,000 elements or
+  262,144 characters. Each code block holds at most 10,000 characters and each page about 90,000; with
+  `selectableDiffs` each file draws at most 600 runs and `@@` lines, and each page about as many (the rest counted
+  in a note); with `svgDiffs` each file draws at most about 150,000 characters of SVG (roughly 800 to 2,000 lines,
+  the rest counted in a note) and each page about 160,000. A turn touching several hundred files could still go
+  past the limit.
 - With `svgDiffs`, the colors come from a small lexer in `hooks/svg.ts` (comments, strings, numbers, one shared
   keyword list), not from Desktop's highlighter or theme, so they are approximate. Multi-line strings aren't
   tracked. Wide characters (CJK, emoji) can push a row past its wrap width. The image is laid out for the pane's
@@ -397,3 +408,8 @@ To have every session reload the mod when its files change, add this next to `CL
 
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
+- **Selectable view screenshot**: a Desktop screenshot of the pane with `selectableDiffs` on, next to the one of
+  the images.
+- **selectableDiffs block size**: the `-`, `+` or space and the space after it add one character per line over the
+  diff text, so a hunk of many very short lines can make a block past the 10,000 characters a block is meant to hold
+  (the engine still takes it). Count the marks when splitting hunks for this view.

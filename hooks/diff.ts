@@ -244,6 +244,37 @@ export function blocks(hunks: readonly Hunk[], max = CODE_CAP): string[] {
   return sources
 }
 
+/** Runs and hunk headers drawn per file as runs: each run is a Code and maybe its frame, Desktop takes 2,000 elements. */
+export const RUN_CAP = 600
+
+/** Consecutive lines of one kind, numbered from their own side: removed lines by the old file, the rest by the new. */
+export type Run = { kind: ' ' | '-' | '+'; start: number; lines: string[] }
+
+/** A file's hunks as runs, RUN_CAP runs and headers at most; `hidden` counts the changed lines past it. */
+export function runHunks(hunks: readonly Hunk[], cap = RUN_CAP): { hunks: { header: string; runs: Run[] }[]; hidden: number } {
+  const out: { header: string; runs: Run[] }[] = []
+  let left = cap
+  let hidden = 0
+  for (const h of hunks) {
+    const runs: Run[] = []
+    let oldAt = h.oldStart
+    let newAt = h.newStart
+    for (const line of h.lines) {
+      const kind = line[0] as Run['kind']
+      const last = runs[runs.length - 1]
+      if (last?.kind === kind) last.lines.push(line.slice(1))
+      else runs.push({ kind, start: kind === '-' ? oldAt : newAt, lines: [line.slice(1)] })
+      if (kind !== '+') oldAt++
+      if (kind !== '-') newAt++
+    }
+    const kept = runs.slice(0, Math.max(0, left - 1))
+    for (const run of runs.slice(kept.length)) if (run.kind !== ' ') hidden += run.lines.length
+    if (kept.length > 0) out.push({ header: hunkHeader(h), runs: kept })
+    left -= kept.length === 0 ? 0 : kept.length + 1
+  }
+  return { hunks: out, hidden }
+}
+
 export const textSize = (hunks: readonly Hunk[]) => hunks.reduce((sum, h) => sum + hunkText(h).length + 1, 0)
 
 /** Groups items into pages of at most `budget` in size; an item larger than that gets a page alone. */

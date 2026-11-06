@@ -39,8 +39,14 @@
     "svgDiffs": {
       "type": "boolean",
       "title": "Draw diffs as images on Desktop",
-      "description": "In the Desktop Code tab, draws each file's diff as an image with red and green lines, line numbers and syntax colors. Off, Desktop shows plain diff code blocks.",
+      "description": "In the Desktop Code tab, draws each file's diff as an image with red and green lines, line numbers and syntax colors; the text can't be selected, so each hunk has a Copy button. Off, Desktop shows plain diff code blocks. selectableDiffs takes precedence.",
       "default": true
+    },
+    "selectableDiffs": {
+      "type": "boolean",
+      "title": "Selectable diffs on Desktop",
+      "description": "In the Desktop Code tab, draws each hunk as numbered code blocks with Desktop's own syntax colors, whose text can be selected: unchanged, removed and added lines in blocks of their own, removed lines marked - in a red frame and added ones marked + in a green frame (a copy takes the marks too). Takes precedence over svgDiffs.",
+      "default": false
     }
   }
 }

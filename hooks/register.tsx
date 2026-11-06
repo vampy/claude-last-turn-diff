@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { FileDiff, Hunk, LastTurn, PendingFile, PickedTurn, Recording, ToolRun, Vcs } from '../types'
-import { blocks, clean, diffFile, fileKey, MAX_SIZE, paginate, relativePath, textSize } from './diff'
+import { blocks, clean, diffFile, fileKey, MAX_SIZE, paginate, relativePath, RUN_CAP, runHunks, textSize } from './diff'
 import { editsOf, pathOf, promptLine, rebuildFiles, turnsOf } from './history'
 import type { TranscriptTurn } from './history'
 import type { Entry, Status } from './vcs'
@@ -20,6 +20,8 @@ const SVG_PAGE_BUDGET = 160_000
 const PICKS = 64
 /** Per hunk on desktop, its header row and Copy button: enough that a page of small hunks stays under 2,000 elements. */
 const HUNK_COST = 800
+/** Per run and hunk header with selectableDiffs, so that a page holds RUN_CAP of them, about 1,200 elements. */
+const RUN_COST = PAGE_BUDGET / RUN_CAP
 /** Status files tracked per turn; past it they are left out of the diff. */
 const MAX_FILES = 1000
 /** Content kept for files dirty at turn start; past it they are recorded by size and mtime. */
@@ -755,8 +757,11 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    // Desktop draws a `Code` diff as plain diff text: there each file's hunks are SVG images, unless turned off
-    const Svg = e.surface === 'desktop' && options.svgDiffs !== false ? $.ui.resolve(e).Svg : undefined
+    // Desktop draws a `Code` diff as plain diff text that can't be selected, but numbered `Code` (startLine) as selectable
+    // code with Desktop's own colors: with selectableDiffs each run of lines is one, removed and added runs framed and marked;
+    // with svgDiffs each file's hunks are SVG images
+    const runs = e.surface === 'desktop' && options.selectableDiffs === true ? turn.files.map(f => runHunks(f.hunks)) : undefined
+    const Svg = e.surface === 'desktop' && runs === undefined && options.svgDiffs !== false ? $.ui.resolve(e).Svg : undefined
     // drawn by the turn and the pane's width, so turning a page draws nothing again; dropped with what was read of the
     // transcript, whose numbers it holds. ponytail: a turn is known by its number, prompt and per-file counts; a content
     // hash if two ever collide
@@ -767,9 +772,11 @@ export const register: Register = (on, options) => {
     const svgs = Svg === undefined ? undefined : history.drawn!.files
     const pages = paginate(
       turn.files.map((file, i) =>
-        svgs === undefined
-          ? textSize(file.hunks)
-          : svgs[i]!.hunks.reduce((sum, hunk) => sum + HUNK_COST + hunk.images.reduce((n, image) => n + image.length, 0), 0),
+        runs !== undefined
+          ? textSize(file.hunks) + RUN_COST * runs[i]!.hunks.reduce((n, hunk) => n + 1 + hunk.runs.length, 0)
+          : svgs === undefined
+            ? textSize(file.hunks)
+            : svgs[i]!.hunks.reduce((sum, hunk) => sum + HUNK_COST + hunk.images.reduce((n, image) => n + image.length, 0), 0),
       ),
       svgs === undefined ? PAGE_BUDGET : SVG_PAGE_BUDGET,
     )
@@ -807,6 +814,7 @@ export const register: Register = (on, options) => {
         {(pages[at] ?? []).map(i => {
           const file = turn.files[i]!
           const drawing = svgs?.[i]
+          const framed = runs?.[i]
           return (
             <Box key={`file-${i}`} flexDirection="column" marginTop={1}>
               {rule}
@@ -815,10 +823,27 @@ export const register: Register = (on, options) => {
                 {counts(file, file.badges)}
               </Box>
               {rule}
-              {withHidden(file.notes, drawing?.hidden ?? 0).map(note => (
+              {withHidden(file.notes, (drawing ?? framed)?.hidden ?? 0).map(note => (
                 <Text dimColor>{note}</Text>
               ))}
-              {Svg !== undefined && drawing !== undefined
+              {framed !== undefined
+                ? framed.hunks.map(hunk => (
+                    // the gap keeps a red frame's edge off a green one's, which together read as one yellow line
+                    <Box flexDirection="column" gap="xs">
+                      <Text dimColor>{hunk.header}</Text>
+                      {hunk.runs.map(run => {
+                        // the marker is part of the code, so a copy takes it too: Desktop's gutter takes nothing of a mod's
+                        const source = clean(run.lines.map(line => `${run.kind} ${line}`).join('\n'))
+                        const code = <Code path={file.path} startLine={run.start} source={source} />
+                        return run.kind === ' ' ? code : (
+                          <Box borderStyle="single" borderColor={run.kind === '-' ? 'error' : 'success'}>
+                            {code}
+                          </Box>
+                        )
+                      })}
+                    </Box>
+                  ))
+                : Svg !== undefined && drawing !== undefined
                 ? drawing.hunks.flatMap((hunk, k) => [
                     // an image can't be selected: Copy puts the hunk's lines as they are now on the clipboard
                     <Box justifyContent="space-between" gap={2}>
