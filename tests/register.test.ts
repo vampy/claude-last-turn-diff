@@ -1049,6 +1049,33 @@ describe('shell edits, Plastic only', () => {
     expect(drawn.rows).toEqual(['b.txt  +1 −1'])
     expect(drawn.texts).toContain('cm update, switch or merge ran this turn: shell changes are not shown.')
   })
+
+  // a shared /tmp would let another user plant a symlink for the mod to empty, or read the base revisions
+  for (const [where, env, folder] of [
+    ['Linux: XDG_RUNTIME_DIR, over a shared TMPDIR', { XDG_RUNTIME_DIR: '/run/user/1000/', TEMP: '', TMPDIR: '/tmp', HOME: '/home/me' }, '/run/user/1000'],
+    ['Linux without XDG_RUNTIME_DIR or TMPDIR: ~/.cache', { TEMP: '', HOME: '/home/me' }, '/home/me/.cache'],
+    ['macOS: TMPDIR', { TEMP: '', TMPDIR: '/var/folders/x/T/', HOME: '/Users/me' }, '/var/folders/x/T'],
+    ['Windows: TEMP', {}, 'C:\\Users\\me\\AppData\\Local\\Temp'],
+  ] as const) {
+    test(`cm writes its output in a per-user folder, never /tmp. ${where}`, async ($, on) => {
+      const { calls } = world(on, { [at('a.txt')]: 'a\n' }, { vcs: 'cm', env })
+      await begin($)
+      await start($, 't1')
+      await complete($, 't1')
+      const xml = calls.find(argv => argv[0] === 'cm' && argv[1] === 'status')?.find(arg => arg.startsWith('--xml='))
+      expect(xml).toBe(`--xml=${folder}/claude-last-turn-diff/ab-status.xml`)
+    })
+  }
+
+  test('with no per-user folder known, cm writes nothing and the turn says so', async ($, on) => {
+    const { calls } = world(on, { [at('a.txt')]: 'a\n' }, { vcs: 'cm', env: { TEMP: '' } })
+    await begin($)
+    await start($, 't1')
+    await bash($, 'build')
+    await complete($, 't1')
+    expect(calls.filter(argv => argv[0] === 'cm' && argv[1] !== 'gwp')).toEqual([])
+    expect((await pane($, 'terminal')).texts).toContain('cm status failed at turn start: shell changes are not shown.')
+  })
 })
 
 const REBUILT = 'Rebuilt from the transcript: Edit, Write and NotebookEdit calls only; line endings not compared.'

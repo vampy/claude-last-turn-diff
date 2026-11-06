@@ -337,8 +337,10 @@ against its turn-start content and drops out if the turn didn't change it.
 
 - git: a commit during the turn still shows its files, from `git diff --name-status <old> <new>`. A HEAD
   that moved any other way (a reset, a checkout) gets a note instead.
-- Plastic: `cm` output goes to files under `%TEMP%\claude-last-turn-diff`, since through a pipe `cm` turns
-  non-ASCII into `?`. Only `gwp`, `status` and `cat` run, never `cm diff`, which can open the GUI. When the
+- Plastic: `cm` output goes to files under `claude-last-turn-diff` in a per-user folder, since through a pipe `cm`
+  turns non-ASCII into `?`: `XDG_RUNTIME_DIR`, else `TEMP`, `TMP` or `TMPDIR`, else `~/.cache`. Never a shared
+  `/tmp`, where another user could plant a symlink for the mod to empty or read the files; with no such folder
+  known, Plastic shell changes are not shown, with a note. Only `gwp`, `status` and `cat` run, never `cm diff`, which can open the GUI. When the
   loaded changeset moves, or a `Bash` or `PowerShell` command in the turn (background ones included) runs
   `cm update`, `switch` or `merge`, the turn-end status is skipped with a note: mid-switch it can list a
   huge, misleading change set, and a status must not run beside an update.

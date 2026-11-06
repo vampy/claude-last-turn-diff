@@ -70,7 +70,7 @@ async function detect($: EngineInterface, cwd: string): Promise<Vcs | null> {
  * The status of the whole repository or workspace; null when it failed, which means no snapshot, never
  * no changes. Plastic writes it to `<prefix>-status.xml`: through a pipe `cm` turns non-ASCII into `?`.
  */
-async function status($: EngineInterface, vcs: Vcs, prefix: string): Promise<Status | null> {
+async function status($: EngineInterface, vcs: Vcs, prefix: string | undefined): Promise<Status | null> {
   if (vcs.kind === 'git') {
     const [head, listed] = await Promise.all([
       run($, ['git', 'rev-parse', '--verify', '--quiet', 'HEAD'], vcs.root),
@@ -85,6 +85,7 @@ async function status($: EngineInterface, vcs: Vcs, prefix: string): Promise<Sta
     // --verify --quiet HEAD exits 1, silent, before the first commit
     return { rev: head.exitCode === 0 ? head.stdout.trim() : '', entries: parseGitStatus(listed.stdout) }
   }
+  if (prefix === undefined) return null
   const file = `${prefix}-status.xml`
   // makes the folder, and an earlier status can never pass for this one
   if ((await $.fs.write(file, '').catch(() => false)) === false) return null
@@ -105,7 +106,7 @@ async function status($: EngineInterface, vcs: Vcs, prefix: string): Promise<Sta
  * A file's content at `rev`, as checkout writes it: null when the revision has no such file, undefined when it
  * could not be fetched or is too large.
  */
-async function baseText($: EngineInterface, vcs: Vcs, rev: string, path: string, prefix: string) {
+async function baseText($: EngineInterface, vcs: Vcs, rev: string, path: string, prefix: string | undefined) {
   if (vcs.kind === 'git') {
     if (rev === '') return null
     // --filters keeps the CRLF core.autocrlf writes; `git show` would not
@@ -113,6 +114,7 @@ async function baseText($: EngineInterface, vcs: Vcs, rev: string, path: string,
     if (ran === null) return undefined
     return ran.exitCode !== 0 ? null : ran.isStdoutTruncated ? undefined : ran.stdout
   }
+  if (prefix === undefined) return undefined
   const file = `${prefix}-cat.tmp`
   const ran = await run($, ['cm', 'cat', `rev:${path}#cs:${rev}`, '--raw', `--file=${file}`], vcs.root, SLOW_RUN)
   if (ran?.exitCode !== 0) return undefined
@@ -131,12 +133,22 @@ async function landed($: EngineInterface, vcs: Vcs, from: string, to: string): P
 }
 
 /**
- * Where `cm` writes its output: outside the workspace and the watched mod folder, a fixed set of names
- * as `$.fs` cannot delete. Keyed by the session id's first two digits, so sessions seldom share one.
+ * Where `cm` writes its output: a per-user folder outside the workspace and the watched mod folder, a fixed set of
+ * names as `$.fs` cannot delete. Keyed by the session id's first two digits, so sessions seldom share one. Never a
+ * shared `/tmp`: another user could plant a symlink there for the mod to empty, or read the base revisions. Undefined,
+ * so no Plastic shell edits, when no per-user folder is known.
  */
-async function scratch($: EngineInterface): Promise<string> {
-  const tmp = (await $.env.get('TEMP')) ?? (await $.env.get('TMP')) ?? (await $.env.get('TMPDIR')) ?? '/tmp'
-  return join(tmp, `claude-last-turn-diff/${(await $.session.id()).slice(0, 2)}`)
+async function scratch($: EngineInterface): Promise<string | undefined> {
+  // per-user: Linux's XDG_RUNTIME_DIR (mode 0700; TMPDIR is mostly unset there), Windows' TEMP, macOS's TMPDIR.
+  // ponytail: a TMPDIR set to a shared folder is trusted; check its mode if that ever matters
+  const home = (await $.env.get('HOME')) || undefined
+  const tmp =
+    (await $.env.get('XDG_RUNTIME_DIR')) ||
+    (await $.env.get('TEMP')) ||
+    (await $.env.get('TMP')) ||
+    (await $.env.get('TMPDIR')) ||
+    (home && join(home, '.cache'))
+  return tmp ? join(tmp, `claude-last-turn-diff/${(await $.session.id()).slice(0, 2)}`) : undefined
 }
 
 /** Which of Claude Code's own files are left out: none, its temporary ones, or its memory and plans too. */
@@ -297,7 +309,7 @@ async function shellFiles(
     const was =
       entry.isNew ? null
       : entry.isBinary || (stat?.size ?? 0) > MAX_SIZE ? undefined
-      : await baseText($, repo, base.rev, entry.oldPath ?? entry.path, `${dir}-${lane}`)
+      : await baseText($, repo, base.rev, entry.oldPath ?? entry.path, dir && `${dir}-${lane}`)
     const before = { before: was === null ? '' : (was ?? null), isNew: was === null, ...(entry.isBinary ? { isBinary: true } : {}) }
     const held = touched.get(id)
     return [id, held === undefined ? { turnId: open.turnId, path, added: 0, removed: 0, ...before } : { ...held, ...before }]
