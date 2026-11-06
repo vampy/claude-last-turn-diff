@@ -250,7 +250,10 @@ export const RUN_CAP = 600
 /** Consecutive lines of one kind, numbered from their own side: removed lines by the old file, the rest by the new. */
 export type Run = { kind: ' ' | '-' | '+'; start: number; lines: string[] }
 
-/** A file's hunks as runs, RUN_CAP runs and headers at most; `hidden` counts the changed lines past it. */
+/**
+ * A file's hunks as runs, RUN_CAP runs and headers at most; `hidden` counts the changed lines past it.
+ * A run is cut where its lines, drawn as `${kind} ${line}`, would pass CODE_CAP: the mark adds a character per line.
+ */
 export function runHunks(hunks: readonly Hunk[], cap = RUN_CAP): { hunks: { header: string; runs: Run[] }[]; hidden: number } {
   const out: { header: string; runs: Run[] }[] = []
   let left = cap
@@ -259,11 +262,19 @@ export function runHunks(hunks: readonly Hunk[], cap = RUN_CAP): { hunks: { head
     const runs: Run[] = []
     let oldAt = h.oldStart
     let newAt = h.newStart
+    let size = 0
     for (const line of h.lines) {
       const kind = line[0] as Run['kind']
       const last = runs[runs.length - 1]
-      if (last?.kind === kind) last.lines.push(line.slice(1))
-      else runs.push({ kind, start: kind === '-' ? oldAt : newAt, lines: [line.slice(1)] })
+      // two characters of mark, the line, its newline
+      const more = line.length + 2
+      if (last?.kind === kind && size + more <= CODE_CAP) {
+        last.lines.push(line.slice(1))
+        size += more
+      } else {
+        runs.push({ kind, start: kind === '-' ? oldAt : newAt, lines: [line.slice(1)] })
+        size = more
+      }
       if (kind !== '+') oldAt++
       if (kind !== '-') newAt++
     }

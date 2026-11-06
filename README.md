@@ -410,6 +410,3 @@ To have every session reload the mod when its files change, add this next to `CL
   `/plugin install`, and `claude plugin tag` for releases.
 - **Selectable view screenshot**: a Desktop screenshot of the pane with `selectableDiffs` on, next to the one of
   the images.
-- **selectableDiffs block size**: the `-`, `+` or space and the space after it add one character per line over the
-  diff text, so a hunk of many very short lines can make a block past the 10,000 characters a block is meant to hold
-  (the engine still takes it). Count the marks when splitting hunks for this view.

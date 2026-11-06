@@ -36,6 +36,16 @@ describe('diff', () => {
     expect(capped.hidden).toBe(1 + 4)
   })
 
+  test('runHunks cuts a run whose marked source would pass CODE_CAP, numbering on across the cut', () => {
+    // empty lines: two characters each in the diff text, three once marked, so a split hunk's run overflows
+    const diff = file('x\n', '\n'.repeat(6000))
+    const runs = runHunks(diff?.hunks ?? []).hunks.flatMap(hunk => hunk.runs)
+    for (const run of runs) expect(run.lines.map(line => `${run.kind} ${line}`).join('\n').length).toBeLessThanOrEqual(CODE_CAP)
+    const added = runs.filter(run => run.kind === '+')
+    expect(added.reduce((n, run) => n + run.lines.length, 0)).toBe(6000)
+    added.slice(1).forEach((run, i) => expect(run.start).toBe(added[i]!.start + added[i]!.lines.length))
+  })
+
   test('insert', () => {
     const diff = file('a\nb\nc\n', 'a\nb\nX\nc\n')
     expect(diff?.hunks).toEqual([
