@@ -5,8 +5,9 @@ turn diff in Codex. It works in the terminal and in the Claude Desktop Code tab.
 Plastic SCM workspace it also shows files that shell commands, scripts and builds changed.
 
 [Install](#install) · [Use](#use) · [If the pane doesn't show](#if-the-pane-doesnt-show) ·
-[What you see](#what-you-see) · [What counts as a change](#what-counts-as-a-change) · [Options](#options) ·
-[Notes and limitations](#notes-and-limitations) · [Develop](#develop)
+[What you see](#what-you-see) · [What counts as a change](#what-counts-as-a-change) ·
+[Compared with /diff](#compared-with-diff) · [Options](#options) · [Notes and limitations](#notes-and-limitations) ·
+[Develop](#develop)
 
 ## Install
 
@@ -47,16 +48,16 @@ To update, run `git pull` in its folder and start a new session. To remove it, d
 
 ## Use
 
-1. Ask Claude for a change that edits files, for example "rename the function greet to welcome everywhere".
+1. Ask Claude for a change that edits files, for example "add due dates to the todos, with a test".
 2. When the turn ends, the **Last turn** pane opens (turn this off with `autoOpen`), and a line above the prompt,
    the band, reads:
 
    ```text
-   Last turn: 2 files +3 −3 [ View ] [ x ]
+   Last turn: 4 files +68 −14 [ View ] [ x ]
    ```
 
    View opens the pane again. x hides the band until the next turn with changes.
-3. Type `/turn-diff` to open the pane, or to close it if it is open. It also replies with a one-line summary,
+3. Type `/turn-diff` to open the pane, or to close it if it is on screen. It also replies with a one-line summary,
    which is all you get on mobile.
 4. To see an earlier turn, pick it from the **Turn** picker at the top of the pane. `/turn-diff` and View go
    back to the last turn with changes.
@@ -68,6 +69,10 @@ keyboard back to the prompt.
 
 ## If the pane doesn't show
 
+- **Claude Code's diff panel is in front.** In the terminal's fullscreen layout, Claude Code's own diff panel
+  (`/diff`) can come up after a turn and take the pane's place. `/turn-diff` and View then say so rather than
+  close the pane: type `/diff` to hide that panel, or turn it off with `"diff@builtin": false` under
+  `enabledPlugins` in `~/.claude/settings.json`.
 - **The turn changed no files.** A question, or a notice that a background task finished, leaves the pane and
   the band as they were.
 - **The terminal is narrow.** Below 144 columns the pane doesn't open by itself: it waits until the terminal is
@@ -79,35 +84,17 @@ keyboard back to the prompt.
 
 ## What you see
 
-<!--
-Media to capture from a real turn and add here, in docs/media/:
-- turn.gif: a terminal turn from the prompt to the pane opening, then picking a file row.
-- terminal.png: the pane docked beside the transcript in a terminal, with the band above the prompt.
-- desktop.png: the pane in the Desktop Code tab, with the image hunks and their Copy buttons.
-Embed each as ![alt text](docs/media/<file>) under a one-line lead-in, terminal first.
--->
+A real turn in a terminal: Claude adds due dates to a small todo app, and when the turn ends the pane opens with its
+four files. (Recorded with Claude Code's own diff panel turned off: see
+[If the pane doesn't show](#if-the-pane-doesnt-show).)
 
-In a terminal, after the rename above, in a session where an earlier turn changed files too, the pane reads
-roughly like this: the picker, the header, then a row per file.
+![A Claude Code turn adds due dates to a todo app; when it ends, the Last turn pane opens beside the transcript with the turn's four files and their diffs](docs/media/turn.gif)
 
-```text
-Turn  T3 · 2 files · rename the function greet to welcome everywhere
-T3 · 2 files · +3 −3
-rename the function greet to welcome everywhere
+The pane after that turn, docked beside the transcript, with the band above the prompt:
 
-src/greet.ts                                   +1 −1
-src/index.ts                                   +2 −2
-```
+![The Last turn pane: the Turn picker, the header T2 · 4 files · +68 −14, a row per file, and the first file's hunk](docs/media/terminal.png)
 
-Each file's hunks follow under its name:
-
-```diff
-@@ -1,3 +1,3 @@
--export function greet(name: string) {
-+export function welcome(name: string) {
-   return `Hello, ${name}!`
- }
-```
+<!-- To add: docs/media/desktop.png, the pane in the Desktop Code tab with its image hunks and Copy buttons. -->
 
 - **Header**: the turn's number, file count and line counts, the prompt's first line, a note when shell changes
   could not be read, and a line saying so when the turn was rebuilt from the transcript.
@@ -138,6 +125,23 @@ Each file's hunks follow under its name:
 - **Earlier turns**: picking one rebuilds its changes from the transcript, so the history survives `--resume` and
   `--continue`. A rebuilt turn shows only Claude's own file-tool calls of the main conversation, and usually shows
   each call's patch in turn rather than one diff per file: see [Earlier turns](#earlier-turns).
+
+## Compared with /diff
+
+Claude Code 2.1.318 has a diff panel of its own, `/diff`. It shows the uncommitted changes (`git diff HEAD`), and
+its **source** picker (Current, T1, T2, …) shows one turn. On the same turns, side by side:
+
+| | `/diff` | last-turn-diff |
+| --- | --- | --- |
+| Shows by default | Every uncommitted change: any turn's, and your own | The last turn's changes |
+| A turn's files | Those Claude's `Edit` and `Write` calls changed | Those too, and files shell commands, scripts and builds changed |
+| A file edited twice in one turn | Each call's patch added up: +2 −1 for a line added, then reworded | One net diff: +1 −0 |
+| Version control | git | git, Plastic SCM or none (shell edits need git or Plastic) |
+
+That is the last turn, which the mod records live. An earlier turn it rebuilds from the transcript has much the same
+limits as `/diff`'s: Claude's own calls only, often shown call by call (see [Earlier turns](#earlier-turns)). The
+two run side by side: when `/diff`'s panel covers the pane, typing `/diff` hides the panel (see
+[If the pane doesn't show](#if-the-pane-doesnt-show)).
 
 ## Options
 
@@ -267,6 +271,15 @@ More on each:
   when its lines repeat so much that the diff passes 20M steps. Each file shows at most about 60,000 characters of
   diff, and the rest is counted in a note.
 
+### Claude Code's diff panel
+
+- In the terminal's fullscreen layout, Claude Code 2.1.318's own diff panel (`/diff`) can come up after a turn and
+  take the dock's place. `$.ui.panes()` still calls the Last turn pane shown, but nothing draws it, and no open
+  brings it back: only `/diff` hiding the panel does. So the mod counts the pane as on screen only once it has drawn
+  since it opened or its turn changed. Shown but not drawn, `/turn-diff` keeps it open and says why, and View shows a
+  toast. A pane that drew before the panel came up (a `/diff` typed later) still counts as on screen: the first
+  `/turn-diff` closes it unseen, and the next one opens it and says where it is.
+
 ### Desktop
 
 - Desktop (app 2.26454) draws no mod UI for a session shown in the second half of a split view: no
@@ -381,5 +394,5 @@ To have every session reload the mod when its files change, add this next to `CL
 
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
-- **Screenshots and a GIF**: of a real turn in the terminal and in Desktop, in `docs/media/`, for
-  [What you see](#what-you-see).
+- **A Desktop screenshot**: the pane in the Desktop Code tab, with its image hunks and Copy buttons, in
+  `docs/media/desktop.png`, for [What you see](#what-you-see).
