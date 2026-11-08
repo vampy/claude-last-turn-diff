@@ -828,15 +828,22 @@ export const register: Register = (on, options) => {
               ))}
               {framed !== undefined
                 ? framed.hunks.map(hunk => (
-                    // the gap keeps a red frame's edge off a green one's, which together read as one yellow line
-                    <Box flexDirection="column" gap="xs">
+                    // the gap keeps a red frame's edge off a green one's, which together read as one yellow line;
+                    // Desktop counts a number in half lines: 0.4 of a 10 px half line is 4 px, half its smallest step (xs)
+                    <Box flexDirection="column" gap={0.4}>
                       <Text dimColor>{hunk.header}</Text>
                       {hunk.runs.map(run => {
                         // the marker is part of the code, so a copy takes it too: Desktop's gutter takes nothing of a mod's
                         const source = clean(run.lines.map(line => `${run.kind} ${line}`).join('\n'))
                         const code = <Code path={file.path} startLine={run.start} source={source} />
+                        // Desktop pads a frame unless told not to: the frame hugs the code
                         return run.kind === ' ' ? code : (
-                          <Box borderStyle="single" borderColor={run.kind === '-' ? 'error' : 'success'}>
+                          <Box
+                            borderStyle="single"
+                            borderColor={run.kind === '-' ? 'error' : 'success'}
+                            paddingX={0}
+                            paddingY={0}
+                          >
                             {code}
                           </Box>
                         )
