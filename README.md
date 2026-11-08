@@ -13,38 +13,41 @@ Plastic SCM workspace it also shows files that shell commands, scripts and build
 
 Needs Claude Code 2.1.289 or later (tested up to 2.1.318).
 
-1. Get the mod:
+1. In a Claude Code session, add this repository as a plugin marketplace:
 
-   ```bash
-   git clone https://github.com/vampy/claude-last-turn-diff
+   ```text
+   /plugin marketplace add vampy/claude-last-turn-diff
    ```
 
-2. A mod runs with your permissions. To see what this one does before you load it, list the hooks it registers,
-   the engine calls it makes and the environment variables it reads:
+2. A mod runs with your permissions. To see what this one does before you install it, list the hooks it
+   registers, the engine calls it makes and the environment variables it reads, from the copy the marketplace
+   fetched:
 
    ```bash
-   claude plugin validate ./claude-last-turn-diff
+   claude plugin validate ~/.claude/plugins/marketplaces/last-turn-diff
    ```
 
    Besides reading files, it runs only read-only `git` and `cm` commands, and writes only temporary files for
    `cm`'s output.
 
-3. Try it in a terminal for one session:
+3. Install it, then start a new session:
 
-   ```bash
-   claude --plugin-dir ./claude-last-turn-diff
+   ```text
+   /plugin install last-turn-diff@last-turn-diff
    ```
 
-4. To load it in every session, the Desktop Code tab included, add this to the `env` block of
-   `~/.claude/settings.json`, then start a new session. On Windows, double the backslashes in the path
-   (`C:\\path\\to\\claude-last-turn-diff`).
+To update, run these and start a new session:
 
-   ```json
-   "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/claude-last-turn-diff"
-   ```
+```bash
+claude plugin marketplace update last-turn-diff
+```
 
-To update, run `git pull` in its folder and start a new session. To remove it, delete that line from
-`~/.claude/settings.json` and start a new session.
+```bash
+claude plugin update last-turn-diff@last-turn-diff
+```
+
+To remove it, run `claude plugin uninstall last-turn-diff@last-turn-diff`, then
+`claude plugin marketplace remove last-turn-diff`.
 
 ## Use
 
@@ -164,7 +167,8 @@ limits as `/diff`'s: Claude's own calls only, often shown call by call (see [Ear
 
 To change them in a terminal, use `/config`. The Desktop Code tab has no `/config`: add this to
 `~/.claude/settings.json`, keeping only the options you change, and start a new session. Project settings are not
-read for plugin options. The key `last-turn-diff@inline` works too; it is the one `claude plugin configure` writes.
+read for plugin options. The full id works too, `last-turn-diff@last-turn-diff` (`last-turn-diff@inline` for a copy loaded
+from a folder); it is the one `claude plugin configure` writes.
 
 ```json
 "pluginConfigs": {
@@ -332,14 +336,23 @@ claude plugin test .
 `tsc -p .` type-checks once the engine has loaded the mod and written `.claude-plugin/types/` (ignored by
 git; the engine rewrites it on every load).
 
-To have every session reload the mod when its files change, add this next to `CLAUDE_CODE_PLUGIN_DIRS` in the
-`env` block of `~/.claude/settings.json`:
+To run a clone instead of the installed copy, uninstall that, then start `claude --plugin-dir .` for one
+session, or load it in every session, the Desktop Code tab included, from the `env` block of
+`~/.claude/settings.json` (on Windows, double the backslashes in the path). The second line reloads the mod
+when its files change:
 
 ```json
+"CLAUDE_CODE_PLUGIN_DIRS": "/path/to/claude-last-turn-diff",
 "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"
 ```
 
-### Roadmap
+### Releasing
 
-- **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
-  `/plugin install`, and `claude plugin tag` for releases.
+Bump `version` in `.claude-plugin/plugin.json`, commit and push, then tag the commit
+`last-turn-diff--v<version>` and push the tag:
+
+```bash
+claude plugin tag --push
+```
+
+Installs follow the default branch, so users get the new version on their next update.

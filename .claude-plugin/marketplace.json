@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "last-turn-diff",
+  "description": "The last-turn-diff mod for Claude Code.",
+  "owner": { "name": "Daniel Butum" },
+  "plugins": [
+    {
+      "name": "last-turn-diff",
+      "description": "Shows every file Claude changed in the last turn as one diff pane (/turn-diff), with a summary band above the prompt.",
+      "source": "./"
+    }
+  ]
+}
