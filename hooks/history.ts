@@ -20,7 +20,8 @@ export function promptLine(text: string): string {
   const line = text.trimStart().startsWith('<task-notification>')
     ? /<summary>([^<]*)<\/summary>/.exec(text)?.[1]?.trim() || 'Background task finished'
     : skill !== null ? `${skill[1]} ${skill[2] ?? ''}`
-    : text
+    // Desktop wraps a pasted prompt in `<pasted_content id="…">` tags: show the text, not the tag
+    : text.replace(/<\/?pasted_content(?:\s[^>]*)?>/g, '')
   // cut by code points, so no emoji is cut in half
   return clean([...(line.split('\n').find(one => one.trim() !== '') ?? '').trim()].slice(0, 200).join(''))
 }

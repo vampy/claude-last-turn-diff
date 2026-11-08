@@ -41,6 +41,11 @@ describe('promptLine', () => {
     )
   })
 
+  test("a pasted prompt shows its text, not Desktop's tags", () => {
+    expect(promptLine('<pasted_content id="9979">\nAdd a field\nmore\n</pasted_content>')).toBe('Add a field')
+    expect(promptLine('see <pasted_content id="1">x</pasted_content>')).toBe('see x')
+  })
+
   test('control characters are made visible and the line is cut at 200 characters', () => {
     expect(promptLine('a\x07b\x1b[0m')).toBe('a␇b␛[0m')
     expect(promptLine('x'.repeat(300))).toBe('x'.repeat(200))
