@@ -1,40 +1,39 @@
 # last-turn-diff
 
+[![version](https://img.shields.io/github/package-json/v/vampy/claude-last-turn-diff?filename=.claude-plugin%2Fplugin.json&label=version)](https://github.com/vampy/claude-last-turn-diff/tags)
+[![Claude Code 2.1.289+](https://img.shields.io/badge/Claude%20Code-2.1.289%2B-D97757)](#install)
+[![License: MIT](https://img.shields.io/github/license/vampy/claude-last-turn-diff)](LICENSE)
+
 **A Claude Code mod that shows what the last turn changed**: every file, one net diff each, in a pane, like the
-turn diff in Codex. It works in the terminal and in the Claude Desktop Code tab. Inside a git repository or a
-Plastic SCM workspace it also shows files that shell commands, scripts and builds changed.
+turn diff in Codex. A file edited five times shows once, before the turn against after it, not as five patches to
+step through. Inside a git repository or a Plastic SCM workspace it also shows files that shell commands, scripts
+and builds changed, and earlier turns are a pick away. It works in the terminal and in the Claude Desktop Code tab.
+
+![A Claude Code turn adds due dates to a todo app; when it ends, the Last turn pane opens beside the transcript with the turn's four files and their diffs](docs/media/turn.gif)
 
 [Install](#install) · [Use](#use) · [If the pane doesn't show](#if-the-pane-doesnt-show) ·
 [What you see](#what-you-see) · [What counts as a change](#what-counts-as-a-change) ·
-[Compared with /diff](#compared-with-diff) · [Options](#options) · [Notes and limitations](#notes-and-limitations) ·
-[Develop](#develop)
+[What it can reach](#what-it-can-reach) · [Compared with /diff](#compared-with-diff) · [Options](#options) ·
+[Notes and limitations](#notes-and-limitations) · [Develop](#develop)
 
 ## Install
 
-Needs Claude Code 2.1.289 or later (tested up to 2.1.318).
+Needs Claude Code 2.1.289 or later (tested up to 2.1.318). In a Claude Code session, add this repository as a
+plugin marketplace, then install the mod and start a new session:
 
-1. In a Claude Code session, add this repository as a plugin marketplace:
+```text
+/plugin marketplace add vampy/claude-last-turn-diff
+```
 
-   ```text
-   /plugin marketplace add vampy/claude-last-turn-diff
-   ```
+```text
+/plugin install last-turn-diff@last-turn-diff
+```
 
-2. A mod runs with your permissions. To see what this one does before you install it, list the hooks it
-   registers, the engine calls it makes and the environment variables it reads, from the copy the marketplace
-   fetched:
+A mod runs with your permissions: [What it can reach](#what-it-can-reach) lists what this one does, and how to
+check that yourself before you install it.
 
-   ```bash
-   claude plugin validate ~/.claude/plugins/marketplaces/last-turn-diff
-   ```
-
-   Besides reading files, it runs only read-only `git` and `cm` commands, and writes only temporary files for
-   `cm`'s output.
-
-3. Install it, then start a new session:
-
-   ```text
-   /plugin install last-turn-diff@last-turn-diff
-   ```
+<details>
+<summary>Update or remove</summary>
 
 To update, run these and start a new session:
 
@@ -48,6 +47,8 @@ claude plugin update last-turn-diff@last-turn-diff
 
 To remove it, run `claude plugin uninstall last-turn-diff@last-turn-diff`, then
 `claude plugin marketplace remove last-turn-diff`.
+
+</details>
 
 ## Use
 
@@ -87,11 +88,9 @@ keyboard back to the prompt.
 
 ## What you see
 
-A real turn in a terminal: Claude adds due dates to a small todo app, and when the turn ends the pane opens with its
-four files. (Recorded with Claude Code's own diff panel turned off: see
+The recording at the top is a real turn in a terminal: Claude adds due dates to a small todo app, and when the turn
+ends the pane opens with its four files. (Recorded with Claude Code's own diff panel turned off: see
 [If the pane doesn't show](#if-the-pane-doesnt-show).)
-
-![A Claude Code turn adds due dates to a todo app; when it ends, the Last turn pane opens beside the transcript with the turn's four files and their diffs](docs/media/turn.gif)
 
 The pane after that turn, docked beside the transcript, with the band above the prompt:
 
@@ -137,6 +136,27 @@ red and added lines in green:
 - **Earlier turns**: picking one rebuilds its changes from the transcript, so the history survives `--resume` and
   `--continue`. A rebuilt turn shows only Claude's own file-tool calls of the main conversation, and usually shows
   each call's patch in turn rather than one diff per file: see [Earlier turns](#earlier-turns).
+
+## What it can reach
+
+A mod runs inside Claude Code with your permissions. This one:
+
+- **Watches** turns starting and ending and Claude's tool calls, and only looks: it never blocks, changes or reruns
+  a call.
+- **Reads** the files a turn changes, before and after it, and, with `turnHistory` on, the conversation's
+  transcript, to rebuild earlier turns.
+- **Runs** only read-only `git` and `cm` commands, and only with `shellEdits` on.
+- **Writes** only temporary files for `cm`'s output, and the clipboard when you press a Copy button.
+- **Reads these environment variables**, to find Claude Code's temporary and config folders: `CLAUDE_CODE_TMPDIR`,
+  `CLAUDE_CONFIG_DIR`, `HOME`, `TEMP`, `TMP`, `TMPDIR`, `USERPROFILE` and `XDG_RUNTIME_DIR`.
+- **Sends nothing anywhere**: it makes no network requests and calls no model.
+
+To check this yourself before you install it, run this after `/plugin marketplace add`. It lists the hooks the mod
+registers, the engine calls it makes and the environment variables it reads, from the copy the marketplace fetched:
+
+```bash
+claude plugin validate ~/.claude/plugins/marketplaces/last-turn-diff
+```
 
 ## Compared with /diff
 
