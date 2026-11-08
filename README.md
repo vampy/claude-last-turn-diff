@@ -18,8 +18,8 @@ and builds changed, and earlier turns are a pick away. It works in the terminal 
 
 ## Install
 
-Needs Claude Code 2.1.289 or later (tested up to 2.1.318). In a Claude Code session, add this repository as a
-plugin marketplace, then install the mod and start a new session:
+Needs Claude Code 2.1.289 or later. In a Claude Code session, add this repository as a plugin marketplace, then
+install the mod and start a new session:
 
 ```text
 /plugin marketplace add vampy/claude-last-turn-diff
