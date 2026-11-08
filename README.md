@@ -99,6 +99,11 @@ numbers, syntax colors and a Copy button:
 
 ![The Last turn pane in the Desktop Code tab: the header T1 · 4 files · +38 −9 with the prompt, a row per file with test/cli.test.ts marked new, and the hunks of src/todo.ts and src/store.ts drawn as images with red and green lines, line numbers and Copy buttons](docs/media/desktop.png)
 
+The same turn with `selectableDiffs` on, where each hunk is numbered code you can select, removed lines framed in
+red and added lines in green:
+
+![The Last turn pane in the Desktop Code tab with selectableDiffs on: the header T1 · 4 files · +38 −9 with the prompt, the same four file rows, and the first hunk of src/todo.ts as runs of numbered code, the added lines marked + in green frames and the removed lines marked - in a red frame, each run with a copy button](docs/media/desktop-selectable.png)
+
 - **Header**: the turn's number, file count and line counts, the prompt's first line, a note when shell changes
   could not be read, and a line saying so when the turn was rebuilt from the transcript.
 - **File rows**: one per file, with its counts and badges: `new`, `deleted`, `binary`, `too large`, or a
@@ -338,5 +343,3 @@ To have every session reload the mod when its files change, add this next to `CL
 
 - **Distribution**: a public repo with `.claude-plugin/marketplace.json` so it installs with
   `/plugin install`, and `claude plugin tag` for releases.
-- **Selectable view screenshot**: a Desktop screenshot of the pane with `selectableDiffs` on, next to the one of
-  the images.
