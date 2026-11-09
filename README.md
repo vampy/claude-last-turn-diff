@@ -45,6 +45,12 @@ claude plugin marketplace update last-turn-diff
 claude plugin update last-turn-diff@last-turn-diff
 ```
 
+Or, in a session, run `/plugin`, open **Marketplaces**, select `last-turn-diff` and select **Update marketplace**: it
+refreshes the marketplace and updates the mod in one step. To stop doing this by hand, select **Enable auto-update**
+there instead, which is off by default for a marketplace like this one: Claude Code then updates the mod in the
+background, up to ten minutes after your first message in a session. Either way the new version loads in your next
+session.
+
 To remove it, run `claude plugin uninstall last-turn-diff@last-turn-diff`, then
 `claude plugin marketplace remove last-turn-diff`.
 
