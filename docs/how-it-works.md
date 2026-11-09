@@ -45,9 +45,13 @@ never looks for a `.git` folder: an empty one makes git fail.
 At turn start it reads the status: `git status --porcelain=v1 -z --untracked-files=all --no-renames`, or
 `cm status --controlledchanged --changed --localdeleted --private --xml=<file>`. It records HEAD or the
 loaded changeset, and each listed file's content, as an `Edit` would (binary files and those past the caps
-by size and mtime alone). This runs alongside the model's first request rather than before it, and every
-tool call waits for it, so no tool runs before the snapshot. At turn end it reads the status again. A file
-listed now but not at turn start was clean then, so its before is the base revision:
+by size and mtime alone). This runs alongside the model's first request rather than before it, and tool calls wait
+for it, so that none runs before the snapshot while the status is quick. A wait on it is the hook's own time, and past
+its 10 s budget the engine runs the call without the hook, so a call waits 5 s at most and then runs beside the
+snapshot. A turn's end does the same, with a note and no shell files, and the snapshot stops once its turn is over.
+`Edit`, `Write` and `NotebookEdit` don't wait: each reads its file before it runs, and that read wins over the
+snapshot's, which may come after the call. At turn end it reads the status again. A file listed now but not at turn
+start was clean then, so its before is the base revision:
 `git cat-file --filters <HEAD>:<path>`, which keeps the CRLF `core.autocrlf` writes, or
 `cm cat rev:<path>#cs:<changeset> --raw --file=<file>`, eight at a time. A file dirty at turn start diffs
 against its turn-start content and drops out if the turn didn't change it.

@@ -261,8 +261,9 @@ More on each:
   1,000 dirty files the rest are left out. At turn end at most 1,000 newly listed files are shown, with a
   note for the rest.
 - A hot reload while the turn-start status is still running loses shell changes for that turn.
-- A status slower than about 10 s at turn start can outlast the first tool call's hook budget; that tool
-  then runs before the snapshot ends, untimed, so what it writes through the shell may not show.
+- A tool call waits for the turn-start status at most 5 s (Claude's own `Edit`, `Write` and `NotebookEdit` don't
+  wait at all, and show in full however slow it is). Past that the call runs beside the status, so what it writes
+  through the shell may not show. A turn that ends before the status does shows no shell changes, with a note.
 - Plastic: a turn that runs `cm update`, `switch` or `merge`, or moves the loaded changeset (a check-in), shows
   only Claude's own edits and the files dirty at turn start, with a note. One started in the background in an
   earlier turn and still running at the next turn's start is not detected: that turn's read-only `cm status` runs

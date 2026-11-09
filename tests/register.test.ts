@@ -7,6 +7,10 @@ import { SVG_CAP } from '../hooks/svg'
 import { parseHunks, svgRows } from './parse'
 import { call, command, edit as editRow, patch, prompt, reply, skill, write } from './transcript'
 
+// the kit's runtime has timers; the mod's types leave them out, as hooks wait with $.clock
+declare function setTimeout(fn: () => void, ms: number): number
+declare function clearTimeout(timer: number): void
+
 const PLUGIN = 'last-turn-diff'
 /** The session id the test world starts with. */
 const SESSION = 'ab12cd34-0000-4000-8000-000000000000'
@@ -146,6 +150,13 @@ function world(
     folders.set(folderOf(norm(to)), clock)
   }
   on('clock.now', () => ({ value: (clock += 10_000) }))
+  // a real wait, as the engine's: the mod waits on the snapshot this long at most
+  on('clock.sleep', ($, e, next) =>
+    new Promise<{ value: undefined }>(resolve => {
+      const timer = setTimeout(() => resolve({ value: undefined }), e.ms)
+      next.signal.addEventListener('abort', () => (clearTimeout(timer), resolve({ value: undefined })))
+    }),
+  )
   // git commits (h1, h2…) or Plastic changesets (7, 8…), each a tree of keys under ROOT; `head` is HEAD or the loaded one
   const tree = (from: ReadonlyMap<string, string>) => new Map([...from].filter(([key]) => key.startsWith(ROOT)))
   let head = vcs === 'cm' ? '7' : 'h1'
@@ -793,6 +804,70 @@ describe('band and command', () => {
 const begin = ($: Engine) => $.session.start({ cwd: CWD, surface: 'terminal', isInteractive: true })
 const at = (file: string) => `${CWD}\\${file}`
 const bash = ($: Engine, command: string) => $.tool.call({ tool: 'Bash', command })
+
+describe('a slow turn-start status', () => {
+  const nine = 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\n'
+
+  // a big repository's first status in a session can take longer than a hook's 10 s budget
+  test('an Edit made while it runs neither waits for it nor loses its before', { options: { turnHistory: false, autoOpen: false } }, async ($, on) => {
+    let release: () => void = () => undefined
+    const held = new Promise<void>(resolve => (release = resolve))
+    world(on, { [at('a.txt')]: nine }, { vcs: 'git', onStatus: n => (n === 1 ? held : undefined) })
+    await begin($)
+    await start($, 't1')
+    await edit($, 'a.txt', 'two', 'TWO')
+    release()
+    await edit($, 'a.txt', 'eight', 'EIGHT')
+    await complete($, 't1')
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'T1 · 1 file · +2 −2: a.txt' })
+  })
+
+  test('a snapshot reading a file after an Edit changed it, before the Edit is recorded, loses to the Edit', {
+    options: { turnHistory: false, autoOpen: false },
+  }, async ($, on) => {
+    let release: () => void = () => undefined
+    const held = new Promise<void>(resolve => (release = resolve))
+    // beneath the mod, once the tool ran: the status comes in and the snapshot reads a.txt as the Edit left it
+    on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
+      const ran = await next(e)
+      release()
+      await new Promise<void>(resolve => setTimeout(resolve, 300))
+      return ran
+    })
+    world(on, { [at('a.txt')]: nine }, { vcs: 'git', onStatus: n => (n === 1 ? held : undefined) })
+    await begin($)
+    await start($, 't1')
+    await edit($, 'a.txt', 'two', 'TWO')
+    await complete($, 't1')
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'T1 · 1 file · +1 −1: a.txt' })
+  })
+
+  test('a turn ending before it does shows its edits, says shell changes are not shown, and leaves the next turn alone', {
+    timeoutMs: 15_000,
+    options: { turnHistory: false, autoOpen: false },
+  }, async ($, on) => {
+    let release: () => void = () => undefined
+    const held = new Promise<void>(resolve => (release = resolve))
+    // b.txt is dirty at turn start, so the first turn's status lists it
+    const base = { [at('a.txt')]: nine, [at('b.txt')]: 'b0\n' }
+    world(on, { [at('a.txt')]: nine, [at('b.txt')]: 'b\n' }, { vcs: 'git', base, onStatus: n => (n === 1 ? held : undefined) })
+    await begin($)
+    await start($, 't1')
+    await edit($, 'a.txt', 'two', 'TWO')
+    // waits SNAPSHOT_WAIT, then ends without it
+    await complete($, 't1')
+    expect((await pane($, 'terminal')).header).toBe(
+      'T1 · 1 file · +1 −1  Fix the thing  The turn-start status was still running at turn end: shell changes are not shown.',
+    )
+    await start($, 't2')
+    await edit($, 'b.txt', 'b', 'B')
+    // the first turn's status comes in now: its snapshot must not take b.txt from the second turn
+    release()
+    await new Promise<void>(resolve => setTimeout(resolve, 200))
+    await complete($, 't2')
+    expect(await $.command.run(RUN)).toMatchObject({ text: 'T2 · 1 file · +1 −1: b.txt' })
+  })
+})
 
 for (const kind of ['git', 'cm'] as const) {
   describe(`shell edits through ${kind}`, () => {

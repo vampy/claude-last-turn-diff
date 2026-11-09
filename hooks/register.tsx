@@ -28,6 +28,11 @@ const MAX_FILES = 1000
 const MAX_BYTES = 16 * 1024 * 1024
 /** Base revisions fetched at once. */
 const LANES = 8
+/**
+ * How long a hook waits for the turn-start snapshot. The wait is the hook's own time, and past its 10 s budget the engine
+ * runs on without it: a tool call unrecorded, a turn's end lost. Half leaves the rest for the hook's own work.
+ */
+const SNAPSHOT_WAIT = 5_000
 /** A Bash or PowerShell command that moves a Plastic workspace, which makes its status misleading. */
 const CM_MOVES = /\bcm(?:\.exe)?["']?\s+(?:update|upd|switch|stb|merge)\b/i
 
@@ -219,6 +224,19 @@ async function isTurnWrite(
   return runs.some(run => at >= run.from - MTIME_SLACK && at <= (run.to ?? Infinity) + MTIME_SLACK)
 }
 
+/** Whether the turn-start snapshot is in, waited for SNAPSHOT_WAIT at most. */
+async function settle($: EngineInterface, snapshotting: Promise<unknown>): Promise<boolean> {
+  const stop = new AbortController()
+  try {
+    return await Promise.race([
+      snapshotting.then(() => true),
+      $.clock.sleep(SNAPSHOT_WAIT, { signal: stop.signal }).then(() => false, () => false),
+    ])
+  } finally {
+    stop.abort()
+  }
+}
+
 const addNote = ($: EngineInterface, turnId: string, note: string) =>
   update($, recording, rec => (rec?.turnId === turnId ? { ...rec, notes: [...(rec.notes ?? []), note] } : rec))
 
@@ -245,6 +263,8 @@ async function snapshotStart($: EngineInterface, repo: Vcs, turnId: string) {
   const tracked: string[] = []
   let room = MAX_BYTES
   for (const [i, entry] of found.entries.slice(0, MAX_FILES).entries()) {
+    // its turn ended without waiting for it (SNAPSHOT_WAIT): the next turn's files are that turn's
+    if ((await read($, recording))?.turnId !== turnId) return
     const path = join(repo.root, entry.path)
     const held = await dirtyFile($, path, entry.isBinary, room)
     if (held === undefined) continue
@@ -563,13 +583,15 @@ export const register: Register = (on, options) => {
     const startedAt = await $.clock.now()
     await update($, recording, () => ({ turnId: e.turnId, turn, prompt: promptLine(e.text), startedAt, keys: [] }))
     const repo = await read($, vcs)
-    // Not awaited: a Plastic status takes seconds, so it runs while the model starts, and each tool call waits for it.
+    // Not awaited: a Plastic status takes seconds, so it runs while the model starts, and each tool call but Claude's
+    // edits waits for it, SNAPSHOT_WAIT at most.
     if (repo !== null) snapshotting = snapshotStart($, repo, e.turnId).catch(() => undefined)
     return next(e)
   })
 
   on('tool.call', async ($, e, next) => {
-    await snapshotting
+    // Claude's own edits read their file before they run, so need no snapshot; the rest wait for it, a while
+    if (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit') await settle($, snapshotting)
     if (e.tool === 'Bash' || e.tool === 'PowerShell') {
       // background commands included: they may still be running when the turn ends
       const isCmBusy = CM_MOVES.test(e.command)
@@ -592,13 +614,15 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e)) // never blocks a tool, nor runs one twice: past next(e) it replays its result
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
-    await snapshotting
     const open = await read($, recording)
     if (open === null) return next(e)
     const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
     const id = fileKey(path)
-    // The tools' originalFile comes back with CRLF turned into LF, so the before is read from disk.
-    const before = open.keys.includes(id) ? undefined : await snapshot($, path)
+    // The tools' originalFile comes back with CRLF turned into LF, so the before is read from disk, unless the turn
+    // holds the file already. A turn-start snapshot still running may read the file after this call changed it: the
+    // before read here wins over that
+    const isMine = (await read($, { ...PENDING, id }))?.turnId !== open.turnId
+    const before = isMine ? await snapshot($, path) : undefined
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
     const result = ran.result as { staged?: boolean; structuredPatch?: readonly Hunk[] } | undefined
@@ -607,7 +631,7 @@ export const register: Register = (on, options) => {
     const added = lines.filter(line => line.startsWith('+')).length
     const removed = lines.filter(line => line.startsWith('-')).length
     await update($, { ...PENDING, id }, held =>
-      held?.turnId === open.turnId
+      held?.turnId === open.turnId && (held.isEdited === true || !isMine)
         ? { ...held, added: held.added + added, removed: held.removed + removed, isEdited: true }
         : {
             turnId: open.turnId,
@@ -629,7 +653,7 @@ export const register: Register = (on, options) => {
   // A subagent's run completes with its agentId and leaves the main turn alone.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
-    await snapshotting
+    const isSnapshotIn = await settle($, snapshotting)
     const open = await read($, recording)
     if (open === null) {
       // a turn started before the mod loaded: the transcript holds one more turn
@@ -642,6 +666,8 @@ export const register: Register = (on, options) => {
     await update($, recording, () => null)
     const cwd = await $.session.cwd()
     const notes = [...(open.notes ?? [])]
+    // ponytail: the snapshot stops at its next file, leaving those it got to in `pending` until a later turn replaces them
+    if (!isSnapshotIn && open.base === undefined) notes.push('The turn-start status was still running at turn end: shell changes are not shown.')
     const touched = new Map<string, PendingFile>()
     for (const id of open.keys) {
       const held = await read($, { ...PENDING, id })
