@@ -1,8 +1,21 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { ElementTable, EngineInterface, Register } from 'claude-code'
 
 import type { FileDiff, Hunk, LastTurn, PendingFile, PickedTurn, Recording, ToolRun, Vcs } from '../types'
-import { blocks, clean, diffFile, fileKey, MAX_SIZE, paginate, relativePath, RUN_CAP, runHunks, textSize } from './diff'
+import {
+  blocks,
+  clean,
+  countChanges,
+  diffFile,
+  fileKey,
+  MAX_SIZE,
+  paginate,
+  relativePath,
+  RUN_CAP,
+  runHunks,
+  textSize,
+} from './diff'
+import type { FileRuns, Snapshot } from './diff'
 import { editsOf, pathOf, promptLine, rebuildFiles, turnsOf } from './history'
 import type { TranscriptTurn } from './history'
 import type { Entry, Status } from './vcs'
@@ -40,15 +53,17 @@ const turns = atom({ plugin: 'last-turn-diff', key: 'turns' } as const, 0)
 const vcs = atom({ plugin: 'last-turn-diff', key: 'vcs' } as const, null)
 const recording = atom({ plugin: 'last-turn-diff', key: 'recording' } as const, null)
 const lastTurn = atom({ plugin: 'last-turn-diff', key: 'lastTurn' } as const, null)
-const later = atom({ plugin: 'last-turn-diff', key: 'later' } as const, [])
+/** The prompts of the turns that ended without changes after `lastTurn`; stored under its first name, `later`. */
+const quietPrompts = atom({ plugin: 'last-turn-diff', key: 'later' } as const, [])
 const isBandHidden = atom({ plugin: 'last-turn-diff', key: 'isBandHidden' } as const, false)
 const page = atom({ plugin: 'last-turn-diff', key: 'page' } as const, 0)
 const picked = atom({ plugin: 'last-turn-diff', key: 'picked' } as const, null)
 const PENDING = { plugin: 'last-turn-diff', key: 'pending' } as const
 
-/** The file's text; null when it does not exist, undefined when too large or unreadable. */
-async function snapshot($: EngineInterface, path: string): Promise<string | null | undefined> {
-  if (!(await $.fs.exists(path).catch(() => true))) return null
+/** The file's content on disk now. */
+async function snapshot($: EngineInterface, path: string): Promise<Snapshot> {
+  const exists = await $.fs.exists(path).catch(() => true)
+  if (!exists) return null
   const stat = await $.fs.stat(path).catch(() => undefined)
   if (stat?.kind !== 'file' || stat.size > MAX_SIZE) return undefined
   return $.fs.read(path).catch(() => undefined)
@@ -68,8 +83,10 @@ async function detect($: EngineInterface, cwd: string): Promise<Vcs | null> {
     run($, ['cm', 'gwp', cwd, '--format={1}'], cwd, 15_000),
   ])
   const found: Vcs[] = []
-  if (git?.exitCode === 0 && git.stdout.trim() !== '') found.push({ kind: 'git', root: git.stdout.trim() })
-  if (cm?.exitCode === 0 && cm.stdout.trim() !== '') found.push({ kind: 'cm', root: cm.stdout.trim() })
+  const gitRoot = git?.exitCode === 0 ? git.stdout.trim() : ''
+  if (gitRoot !== '') found.push({ kind: 'git', root: gitRoot })
+  const cmRoot = cm?.exitCode === 0 ? cm.stdout.trim() : ''
+  if (cmRoot !== '') found.push({ kind: 'cm', root: cmRoot })
   return nearest(found)
 }
 
@@ -88,14 +105,17 @@ async function status($: EngineInterface, vcs: Vcs, prefix: string | undefined):
         SLOW_RUN,
       ),
     ])
-    if (head === null || listed?.exitCode !== 0 || listed.isStdoutTruncated) return null
+    if (head === null) return null
+    if (listed?.exitCode !== 0 || listed.isStdoutTruncated) return null
     // --verify --quiet HEAD exits 1, silent, before the first commit
-    return { rev: head.exitCode === 0 ? head.stdout.trim() : '', entries: parseGitStatus(listed.stdout) }
+    const rev = head.exitCode === 0 ? head.stdout.trim() : ''
+    return { rev, entries: parseGitStatus(listed.stdout) }
   }
   if (prefix === undefined) return null
   const file = `${prefix}-status.xml`
   // makes the folder, and an earlier status can never pass for this one
-  if ((await $.fs.write(file, '').catch(() => false)) === false) return null
+  const isEmptied = await $.fs.write(file, '').then(() => true, () => false)
+  if (!isEmptied) return null
   const ran = await run(
     $,
     ['cm', 'status', '--controlledchanged', '--changed', '--localdeleted', '--private', `--xml=${file}`, '--encoding=utf-8'],
@@ -109,17 +129,22 @@ async function status($: EngineInterface, vcs: Vcs, prefix: string | undefined):
   return xml === undefined ? null : parseCmStatus(xml)
 }
 
-/**
- * A file's content at `rev`, as checkout writes it: null when the revision has no such file, undefined when it
- * could not be fetched or is too large.
- */
-async function baseText($: EngineInterface, vcs: Vcs, rev: string, path: string, prefix: string | undefined) {
+/** A file's content at `rev`, as checkout writes it: null when the revision has no such file. */
+async function baseText(
+  $: EngineInterface,
+  vcs: Vcs,
+  rev: string,
+  path: string,
+  prefix: string | undefined,
+): Promise<Snapshot> {
   if (vcs.kind === 'git') {
     if (rev === '') return null
     // --filters keeps the CRLF core.autocrlf writes; `git show` would not
     const ran = await run($, ['git', 'cat-file', '--filters', `${rev}:${path}`], vcs.root)
     if (ran === null) return undefined
-    return ran.exitCode !== 0 ? null : ran.isStdoutTruncated ? undefined : ran.stdout
+    if (ran.exitCode !== 0) return null
+    if (ran.isStdoutTruncated) return undefined
+    return ran.stdout
   }
   if (prefix === undefined) return undefined
   const file = `${prefix}-cat.tmp`
@@ -136,7 +161,8 @@ async function landed($: EngineInterface, vcs: Vcs, from: string, to: string): P
   const ancestor = await run($, ['git', 'merge-base', '--is-ancestor', from, to], vcs.root)
   if (ancestor?.exitCode !== 0) return null
   const diff = await run($, ['git', 'diff', '--name-status', '-z', '--no-renames', from, to], vcs.root)
-  return diff?.exitCode !== 0 || diff.isStdoutTruncated ? null : parseNameStatus(diff.stdout)
+  if (diff?.exitCode !== 0 || diff.isStdoutTruncated) return null
+  return parseNameStatus(diff.stdout)
 }
 
 /**
@@ -148,14 +174,16 @@ async function landed($: EngineInterface, vcs: Vcs, from: string, to: string): P
 async function scratch($: EngineInterface): Promise<string | undefined> {
   // per-user: Linux's XDG_RUNTIME_DIR (mode 0700; TMPDIR is mostly unset there), Windows' TEMP, macOS's TMPDIR.
   // ponytail: a TMPDIR set to a shared folder is trusted; check its mode if that ever matters
-  const home = (await $.env.get('HOME')) || undefined
-  const tmp =
-    (await $.env.get('XDG_RUNTIME_DIR')) ||
-    (await $.env.get('TEMP')) ||
-    (await $.env.get('TMP')) ||
-    (await $.env.get('TMPDIR')) ||
-    (home && join(home, '.cache'))
-  return tmp ? join(tmp, `claude-last-turn-diff/${(await $.session.id()).slice(0, 2)}`) : undefined
+  const runtime = await $.env.get('XDG_RUNTIME_DIR')
+  const temp = await $.env.get('TEMP')
+  const tmp = await $.env.get('TMP')
+  const tmpdir = await $.env.get('TMPDIR')
+  const home = await $.env.get('HOME')
+  const cache = home ? join(home, '.cache') : undefined
+  const base = runtime || temp || tmp || tmpdir || cache
+  if (!base) return undefined
+  const id = await $.session.id()
+  return join(base, `claude-last-turn-diff/${id.slice(0, 2)}`)
 }
 
 /** Which of Claude Code's own files are left out: none, its temporary ones, or its memory and plans too. */
@@ -171,23 +199,33 @@ type Hidden = 'none' | 'temp' | 'all'
 async function claudeOwn($: EngineInterface, cwd: string, hidden: Hidden): Promise<string[]> {
   if (hidden === 'none') return []
   // the engine lists the variables a module reads: each name spelled out
-  const tmp = (await $.env.get('CLAUDE_CODE_TMPDIR')) || undefined
-  const tmps = tmp !== undefined ? [tmp] : [await $.env.get('TEMP'), await $.env.get('TMP'), await $.env.get('TMPDIR'), '/tmp']
-  const config = (await $.env.get('CLAUDE_CONFIG_DIR')) || undefined
-  const homes = config !== undefined ? [] : [await $.env.get('HOME'), await $.env.get('USERPROFILE')]
-  const configs = hidden !== 'all' ? [] : config !== undefined ? [config] : homes.map(home => home && join(home, '.claude'))
+  const ownTmp = await $.env.get('CLAUDE_CODE_TMPDIR')
+  const temp = await $.env.get('TEMP')
+  const tmp = await $.env.get('TMP')
+  const tmpdir = await $.env.get('TMPDIR')
+  const config = await $.env.get('CLAUDE_CONFIG_DIR')
+  const home = await $.env.get('HOME')
+  const profile = await $.env.get('USERPROFILE')
+  const tmps = ownTmp ? [ownTmp] : [temp, tmp, tmpdir, '/tmp']
+  let configs: (string | null)[] = []
+  if (hidden === 'all') {
+    const homes = [home, profile].map(at => (at ? join(at, '.claude') : null))
+    configs = config ? [config] : homes
+  }
   // on Windows a folder spelled from / lands on the session's drive, never where Claude Code keeps anything
   const isWindows = /^(?:[a-z]:|\\\\)/i.test(cwd)
+  const isPlace = (base: string | null | undefined): base is string => !!base && !(isWindows && /^[\\/]/.test(base))
   const places = [
-    ...tmps.map(base => ({ base, names: ['claude'] })),
-    ...configs.map(base => ({ base, names: ['projects', 'agent-memory', 'plans'] })),
-  ].filter((place): place is { base: string; names: string[] } => !!place.base && !(isWindows && /^[\\/]/.test(place.base)))
-  const keys = await Promise.all(
-    places.map(async ({ base, names }) => {
-      const real = await $.fs.stat(base, { resolve: true }).then(found => found.realPath, () => undefined)
-      return [base, real].flatMap(at => (at === undefined ? [] : names.map(name => fileKey(join(join(at, name), '')))))
-    }),
-  )
+    ...tmps.filter(isPlace).map(base => ({ base, names: ['claude'] })),
+    ...configs.filter(isPlace).map(base => ({ base, names: ['projects', 'agent-memory', 'plans'] })),
+  ]
+  /** A place's folders as keys, under the base as spelled and where it lands. */
+  const keysOf = async ({ base, names }: { base: string; names: string[] }) => {
+    const real = await $.fs.stat(base, { resolve: true }).then(found => found.realPath, () => undefined)
+    const bases = real === undefined ? [base] : [base, real]
+    return bases.flatMap(at => names.map(name => fileKey(join(join(at, name), ''))))
+  }
+  const keys = await Promise.all(places.map(keysOf))
   return keys.flat()
 }
 
@@ -195,7 +233,10 @@ async function claudeOwn($: EngineInterface, cwd: string, hidden: Hidden): Promi
 function isClaudeOwn(roots: readonly string[], cwd: string, path: string): boolean {
   const file = fileKey(path)
   const here = fileKey(join(cwd, ''))
-  return roots.some(root => file.startsWith(root) && !(here.startsWith(root) && file.startsWith(here)))
+  return roots.some(root => {
+    const isInSessionCwd = here.startsWith(root) && file.startsWith(here)
+    return file.startsWith(root) && !isInSessionCwd
+  })
 }
 
 /** Leeway around a call's run for a file system's coarse mtimes (FAT's 2 s) and a network share's clock. */
@@ -215,13 +256,25 @@ async function isTurnWrite(
 ): Promise<boolean> {
   // recorded before calls were timed: everything counts, as it did then
   if (startedAt === undefined) return true
-  const at =
-    mtimeMs !== undefined && mtimeMs >= startedAt - MTIME_SLACK
-      ? mtimeMs
-      : await $.fs.stat(path.replace(/[\\/][^\\/]*$/, '')).then(folder => folder.mtimeMs, () => undefined)
+  const at = await writtenAt($, startedAt, path, mtimeMs)
   // its folder gone too: nothing tells
   if (at === undefined) return true
-  return runs.some(run => at >= run.from - MTIME_SLACK && at <= (run.to ?? Infinity) + MTIME_SLACK)
+  return runs.some(run => {
+    const to = run.to ?? Infinity
+    return at >= run.from - MTIME_SLACK && at <= to + MTIME_SLACK
+  })
+}
+
+/** When isTurnWrite takes the file as last written: its mtime when from the turn, else its folder's. */
+async function writtenAt(
+  $: EngineInterface,
+  startedAt: number,
+  path: string,
+  mtimeMs: number | undefined,
+): Promise<number | undefined> {
+  if (mtimeMs !== undefined && mtimeMs >= startedAt - MTIME_SLACK) return mtimeMs
+  const folder = path.replace(/[\\/][^\\/]*$/, '')
+  return $.fs.stat(folder).then(found => found.mtimeMs, () => undefined)
 }
 
 /** Whether the turn-start snapshot is in, waited for SNAPSHOT_WAIT at most. */
@@ -238,7 +291,16 @@ async function settle($: EngineInterface, snapshotting: Promise<unknown>): Promi
 }
 
 const addNote = ($: EngineInterface, turnId: string, note: string) =>
-  update($, recording, rec => (rec?.turnId === turnId ? { ...rec, notes: [...(rec.notes ?? []), note] } : rec))
+  update($, recording, rec => {
+    if (rec?.turnId !== turnId) return rec
+    return { ...rec, notes: [...(rec.notes ?? []), note] }
+  })
+
+/** A snapshot as `pending` holds it: '' and new for a file that did not exist, null for one it could not read. */
+function beforeOf(text: Snapshot): Pick<PendingFile, 'before' | 'isNew'> {
+  if (text === null) return { before: '', isNew: true }
+  return { before: text ?? null, isNew: false }
+}
 
 /** A file the status lists at turn start: its text, or binary or past the caps its size and mtime; undefined for a folder. */
 async function dirtyFile(
@@ -250,9 +312,13 @@ async function dirtyFile(
   const stat = await $.fs.stat(path).catch(() => undefined)
   if (stat === undefined) return { before: '', isNew: true }
   if (stat.kind !== 'file') return undefined
-  const text = isBinary || stat.size > Math.min(MAX_SIZE, room) ? undefined : await $.fs.read(path).catch(() => undefined)
+  const isTooLarge = stat.size > Math.min(MAX_SIZE, room)
+  let text: string | undefined
+  if (!isBinary && !isTooLarge) text = await $.fs.read(path).catch(() => undefined)
   if (text !== undefined && !text.includes('\0')) return { before: text, isNew: false }
-  return { before: null, isNew: false, stamp: { size: stat.size, mtimeMs: stat.mtimeMs }, isBinary: isBinary || text !== undefined }
+  // read, it holds a NUL: binary
+  const stamp = { size: stat.size, mtimeMs: stat.mtimeMs }
+  return { before: null, isNew: false, stamp, isBinary: isBinary || text !== undefined }
 }
 
 /** The turn-start status: each listed file into the turn's `pending`, as an Edit's first call puts one. */
@@ -264,21 +330,24 @@ async function snapshotStart($: EngineInterface, repo: Vcs, turnId: string) {
   let room = MAX_BYTES
   for (const [i, entry] of found.entries.slice(0, MAX_FILES).entries()) {
     // its turn ended without waiting for it (SNAPSHOT_WAIT): the next turn's files are that turn's
-    if ((await read($, recording))?.turnId !== turnId) return
+    const rec = await read($, recording)
+    if (rec?.turnId !== turnId) return
     const path = join(repo.root, entry.path)
-    const held = await dirtyFile($, path, entry.isBinary, room)
-    if (held === undefined) continue
-    room -= held.before?.length ?? 0
-    tracked.push(ids[i]!)
-    await update($, { ...PENDING, id: ids[i]! }, was =>
-      was?.turnId === turnId ? was : { turnId, path, added: 0, removed: 0, ...held },
-    )
+    const file = await dirtyFile($, path, entry.isBinary, room)
+    if (file === undefined) continue
+    room -= file.before?.length ?? 0
+    const id = ids[i]!
+    tracked.push(id)
+    await update($, { ...PENDING, id }, was => {
+      if (was?.turnId === turnId) return was
+      return { turnId, path, added: 0, removed: 0, ...file }
+    })
   }
-  await update($, recording, rec =>
-    rec?.turnId === turnId
-      ? { ...rec, base: { rev: found.rev, dirty: ids }, keys: [...rec.keys, ...tracked.filter(id => !rec.keys.includes(id))] }
-      : rec,
-  )
+  await update($, recording, rec => {
+    if (rec?.turnId !== turnId) return rec
+    const added = tracked.filter(id => !rec.keys.includes(id))
+    return { ...rec, base: { rev: found.rev, dirty: ids }, keys: [...rec.keys, ...added] }
+  })
 }
 
 /**
@@ -288,12 +357,12 @@ async function snapshotStart($: EngineInterface, repo: Vcs, turnId: string) {
 async function shellFiles(
   $: EngineInterface,
   repo: Vcs,
-  open: Recording,
+  rec: Recording,
   touched: ReadonlyMap<string, PendingFile>,
   notes: string[],
 ): Promise<[string, PendingFile][]> {
-  const base = open.base!
-  if (repo.kind === 'cm' && open.isCmBusy === true) {
+  const base = rec.base!
+  if (repo.kind === 'cm' && rec.isCmBusy === true) {
     notes.push('cm update, switch or merge ran this turn: shell changes are not shown.')
     return []
   }
@@ -313,14 +382,18 @@ async function shellFiles(
     if (committed === null) {
       const name = (rev: string) => (rev === '' ? 'no commit' : rev.slice(0, 9))
       notes.push(`HEAD moved from ${name(base.rev)} to ${name(now.rev)}: files changed only by that move are not shown.`)
-    } else entries = [...entries, ...committed]
+    } else {
+      entries = [...entries, ...committed]
+    }
   }
   const dirty = new Set(base.dirty)
   const fresh = new Map<string, Entry>()
   for (const entry of entries) {
     const id = fileKey(join(repo.root, entry.path))
-    const held = touched.get(id)
-    if (!dirty.has(id) && (held === undefined || held.isAfterShell === true) && !fresh.has(id)) fresh.set(id, entry)
+    const pending = touched.get(id)
+    const isEditFirst = pending !== undefined && pending.isAfterShell !== true
+    if (dirty.has(id) || isEditFirst || fresh.has(id)) continue
+    fresh.set(id, entry)
   }
   const kept = [...fresh].slice(0, MAX_FILES)
   if (fresh.size > kept.length) notes.push(`${fresh.size - kept.length} more changed files are not shown.`)
@@ -328,13 +401,18 @@ async function shellFiles(
     const path = join(repo.root, entry.path)
     const stat = await $.fs.stat(path).catch(() => undefined)
     if (stat !== undefined && stat.kind !== 'file') return null
-    const was =
-      entry.isNew ? null
-      : entry.isBinary || (stat?.size ?? 0) > MAX_SIZE ? undefined
-      : await baseText($, repo, base.rev, entry.oldPath ?? entry.path, dir && `${dir}-${lane}`)
-    const before = { before: was === null ? '' : (was ?? null), isNew: was === null, ...(entry.isBinary ? { isBinary: true } : {}) }
-    const held = touched.get(id)
-    return [id, held === undefined ? { turnId: open.turnId, path, added: 0, removed: 0, ...before } : { ...held, ...before }]
+    const isTooLarge = (stat?.size ?? 0) > MAX_SIZE
+    let was: Snapshot
+    if (entry.isNew) {
+      was = null
+    } else if (!entry.isBinary && !isTooLarge) {
+      const prefix = dir === undefined ? undefined : `${dir}-${lane}`
+      was = await baseText($, repo, base.rev, entry.oldPath ?? entry.path, prefix)
+    }
+    const before = { ...beforeOf(was), ...(entry.isBinary ? { isBinary: true } : {}) }
+    const pending = touched.get(id)
+    if (pending === undefined) return [id, { turnId: rec.turnId, path, added: 0, removed: 0, ...before }]
+    return [id, { ...pending, ...before }]
   })
   return files.filter(file => file !== null)
 }
@@ -391,12 +469,15 @@ const forget = (history: History) => {
 async function load($: EngineInterface, history: History, hidden: Hidden): Promise<TranscriptTurn[]> {
   const cwd = await $.session.cwd()
   const roots = await claudeOwn($, cwd, hidden)
-  const found = turnsOf(await $.session.messages().catch(() => [])).map(t => ({
+  const messages = await $.session.messages().catch(() => [])
+  const found = turnsOf(messages).map(t => ({
     ...t,
     uses: t.uses.filter(use => !isClaudeOwn(roots, cwd, pathOf(use) ?? '')),
   }))
-  const open = (await read($, recording))?.prompt ?? history.ending
-  if (open !== undefined && found[found.length - 1]?.prompt === open) found.pop()
+  const rec = await read($, recording)
+  const runningPrompt = rec?.prompt ?? history.ending
+  const newest = found[found.length - 1]
+  if (runningPrompt !== undefined && newest?.prompt === runningPrompt) found.pop()
   forget(history)
   history.turns = found.map(({ turn, prompt, uses }) => ({ turn, prompt, files: editsOf(uses).size }))
   return found
@@ -421,17 +502,20 @@ function resolve(listed: readonly Listed[], live: LastTurn | null, after: readon
     i--
   }
   const mine = listed[i]
-  const number = live === null ? undefined : mine?.prompt === live.prompt ? mine.turn : (mine?.turn ?? 0) + 1
-  const entries = [
-    ...listed.filter((t, k) => t.turn !== number && t.files > 0 && !quiet.has(k)),
-    ...(live === null ? [] : [{ turn: number!, prompt: live.prompt, files: live.files.length }]),
-  ].sort((a, b) => a.turn - b.turn)
+  let number: number | undefined
+  if (live === null) number = undefined
+  else if (mine?.prompt === live.prompt) number = mine.turn
+  else number = (mine?.turn ?? 0) + 1
+  const entries = listed.filter((t, k) => t.turn !== number && t.files > 0 && !quiet.has(k))
+  if (live !== null) entries.push({ turn: number!, prompt: live.prompt, files: live.files.length })
+  entries.sort((a, b) => a.turn - b.turn)
   const at = entries.length - (pick?.fromEnd ?? 0)
   const near = entries
     .map((t, i) => ({ t, far: Math.abs(i - at) }))
     .filter(({ t }) => t.prompt === pick?.prompt)
     .sort((a, b) => a.far - b.far)
-  return { entries, number, want: (near[0]?.t ?? entries[entries.length - 1])?.turn }
+  const wanted = near[0]?.t ?? entries[entries.length - 1]
+  return { entries, number, want: wanted?.turn }
 }
 
 /**
@@ -445,7 +529,10 @@ async function shown(
   isListed: boolean,
   hidden: Hidden,
 ): Promise<{ turn: Shown | null; entries: Listed[] }> {
-  if (!isListed) return { turn: await read($, lastTurn), entries: [] }
+  if (!isListed) {
+    const turn = await read($, lastTurn)
+    return { turn, entries: [] }
+  }
   const id = await $.session.id()
   // drawn after a /clear or a resume ended it, before the next conversation is in place: nothing of it
   if (id === history.ended) return { turn: null, entries: [] }
@@ -454,57 +541,326 @@ async function shown(
     history.id = id
     forget(history)
   }
-  let found = history.turns === undefined ? await load($, history, hidden) : undefined
+  let found: TranscriptTurn[] | undefined
+  if (history.turns === undefined) found = await load($, history, hidden)
   const live = await read($, lastTurn)
-  const after = await read($, later)
+  const quiet = await read($, quietPrompts)
   const pick = await read($, picked)
-  let view = resolve(history.turns ?? [], live, after, pick)
-  if (view.want !== undefined && view.want !== view.number && history.rebuilt?.turn !== view.want) {
+  let view = resolve(history.turns ?? [], live, quiet, pick)
+  // a turn of the transcript's other than the one rebuilt last
+  const isRebuildDue = view.want !== undefined && view.want !== view.number && history.rebuilt?.turn !== view.want
+  if (isRebuildDue) {
     if (found === undefined) {
       found = await load($, history, hidden)
-      view = resolve(history.turns ?? [], live, after, pick)
+      view = resolve(history.turns ?? [], live, quiet, pick)
     }
     const turn = found.find(t => t.turn === view.want && t.turn !== view.number)
     if (turn !== undefined) {
-      const files = rebuildFiles(turn.uses, await $.session.cwd())
+      const cwd = await $.session.cwd()
+      const files = rebuildFiles(turn.uses, cwd)
       history.rebuilt = { turn: turn.turn, prompt: turn.prompt, files, isRebuilt: true }
     }
   }
-  const turn =
-    view.want === undefined ? null
-    : view.want === view.number ? { ...live!, turn: view.want }
-    : history.rebuilt?.turn === view.want ? history.rebuilt
-    : null
-  return { turn, entries: view.entries }
+  const { entries, number, want } = view
+  if (want === undefined) return { turn: null, entries }
+  if (want === number) return { turn: { ...live!, turn: want }, entries }
+  if (history.rebuilt?.turn === want) return { turn: history.rebuilt, entries }
+  return { turn: null, entries }
 }
 
 /** A turn ended without changes, or unrecorded, and leaves the last one on show: its prompt, null when unrecorded. */
-const passed = ($: EngineInterface, prompt: string | null) => update($, later, list => [...list, prompt])
+const addQuietTurn = ($: EngineInterface, prompt: string | null) => update($, quietPrompts, list => [...list, prompt])
+
+/** Shows the newest turn from its first page. */
+async function resetView($: EngineInterface) {
+  await update($, picked, () => null)
+  await update($, page, () => 0)
+}
 
 /** The text cut to 60 code points, so no emoji is cut in half. */
 function short(text: string): string {
   const points = [...text]
-  return points.length > 60 ? `${points.slice(0, 59).join('')}…` : text
+  if (points.length <= 60) return text
+  return `${points.slice(0, 59).join('')}…`
 }
 
-/** diffFile's note for the changed lines past its cap. */
-const MORE = ' more changed lines not shown'
+/** The file's notes, then one count of the changed lines left out: past the diff's cap and past the drawing's. */
+function notesOf(file: FileDiff, drawnHidden: number): readonly string[] {
+  const hidden = (file.hidden ?? 0) + drawnHidden
+  if (hidden === 0) return file.notes
+  return [...file.notes, `${hidden} more changed lines not shown`]
+}
 
-/** The file's notes, the drawing's own cut added to diffFile's count of changed lines not shown. */
-function withHidden(notes: readonly string[], hidden: number): readonly string[] {
-  if (hidden === 0) return notes
-  const cut = notes.find(note => note.endsWith(MORE))
-  return [...notes.filter(note => note !== cut), `${hidden + (cut === undefined ? 0 : parseInt(cut))}${MORE}`]
+/** A picker entry's label: its number, its file count and its prompt cut short. */
+function pickLabel(t: Listed): string {
+  const parts = [`T${t.turn}`, count(t.files)]
+  if (t.prompt !== '') parts.push(short(t.prompt))
+  return parts.join(' · ')
 }
 
 /** The pane closed (or behind another tab), drawn, or open but behind Claude Code's diff panel: shown, not drawn. */
-async function sight($: EngineInterface, isDrawn: boolean): Promise<'closed' | 'drawn' | 'covered'> {
-  if (!(await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)) return 'closed'
+async function paneState($: EngineInterface, isDrawn: boolean): Promise<'closed' | 'drawn' | 'covered'> {
+  const panes = await $.ui.panes()
+  const isShown = panes.some(pane => pane.id === PANE && pane.isShown)
+  if (!isShown) return 'closed'
   return isDrawn ? 'drawn' : 'covered'
 }
 
-/** The path cut from the left to fit `room` cells. */
-const fit = (path: string, room: number) => (path.length > room ? `…${path.slice(-(Math.max(room, 10) - 1))}` : path)
+/** The path cut from the left to fit `room` cells, keeping 9 characters at least. */
+function fit(path: string, room: number): string {
+  if (path.length <= room) return path
+  const kept = Math.max(room, 10) - 1
+  return `…${path.slice(-kept)}`
+}
+
+/**
+ * The files the turn touched, by `pending` id: those its Edits and its turn-start status hold, taken out of `pending`,
+ * and those only shell commands changed. `notes` gets why shell changes may be missing.
+ */
+async function collectTouched($: EngineInterface, rec: Recording, notes: string[]): Promise<Map<string, PendingFile>> {
+  const touched = new Map<string, PendingFile>()
+  for (const id of rec.keys) {
+    const pending = await read($, { ...PENDING, id })
+    await update($, { ...PENDING, id }, () => null)
+    if (pending?.turnId === rec.turnId) touched.set(id, pending)
+  }
+  const repo = await read($, vcs)
+  if (repo !== null && rec.base !== undefined) {
+    const shell = await shellFiles($, repo, rec, touched, notes)
+    for (const [id, file] of shell) touched.set(id, file)
+  }
+  return touched
+}
+
+/**
+ * The touched files' net changes. Left out: Claude Code's own files that `hidden` names, a file recorded by size and
+ * mtime that kept both, and a file only the status lists that was written while none of `runs` ran.
+ */
+async function diffTouched(
+  $: EngineInterface,
+  rec: Recording,
+  touched: ReadonlyMap<string, PendingFile>,
+  runs: readonly ToolRun[],
+  hidden: Hidden,
+): Promise<FileDiff[]> {
+  const cwd = await $.session.cwd()
+  let roots: string[] = []
+  if (touched.size > 0) roots = await claudeOwn($, cwd, hidden)
+  const files: FileDiff[] = []
+  for (const pending of touched.values()) {
+    // a scratchpad file, a commit message Claude wrote down: not the turn's work
+    if (isClaudeOwn(roots, cwd, pending.path)) continue
+    const now = await $.fs.stat(pending.path).catch(() => undefined)
+    // a file recorded by size and mtime is unchanged while both are
+    const stamp = pending.stamp
+    const isUnchanged = stamp !== undefined && now?.size === stamp.size && now.mtimeMs === stamp.mtimeMs
+    if (isUnchanged) continue
+    // one only the status lists, written while none of the turn's calls ran: another session's, an editor's
+    if (pending.isEdited !== true) {
+      const isWritten = await isTurnWrite($, rec.startedAt, runs, pending.path, now?.mtimeMs)
+      if (!isWritten) continue
+    }
+    const after = await snapshot($, pending.path)
+    const path = clean(relativePath(cwd, pending.path))
+    const file = diffFile({ ...pending, path, after })
+    if (file !== null) files.push(file)
+  }
+  return files
+}
+
+/** The elements the pane draws with, as `$.ui.resolve(e)` gives them on the terminal and desktop. */
+type PaneUi = Pick<ElementTable<'desktop'>, 'Box' | 'Button' | 'Code' | 'Select' | 'Text'>
+/** Desktop's element for an SVG image. */
+type SvgElement = ElementTable<'desktop'>['Svg']
+
+/** `+a −r`, colored, then the badges dim. */
+function counts(Text: PaneUi['Text'], changes: { added: number; removed: number }, badges: readonly string[] = []) {
+  return (
+    <Text>
+      <Text color="success">+{changes.added}</Text> <Text color="error">−{changes.removed}</Text>
+      {badges.map(badge => (
+        <Text dimColor>{`  ${badge}`}</Text>
+      ))}
+    </Text>
+  )
+}
+
+/** The turn picker, when there is more than one turn; a pick shows that turn from its first page. */
+function turnPicker({ Select }: PaneUi, $: EngineInterface, turn: Shown, entries: readonly Listed[]) {
+  if (entries.length <= 1) return false
+  return (
+    <Select
+      key="turn"
+      label="Turn"
+      options={entries.slice(-PICKS).map(t => ({ value: String(t.turn), label: pickLabel(t) }))}
+      value={String(turn.turn)}
+      onSelect={async value => {
+        const i = entries.findIndex(t => String(t.turn) === value)
+        let pick: PickedTurn | null = null
+        if (i >= 0) pick = { prompt: entries[i]!.prompt, fromEnd: entries.length - i }
+        await update($, picked, () => pick)
+        await update($, page, () => 0)
+      }}
+    />
+  )
+}
+
+/** The turn's number, file count and totals, then its prompt, whether it was rebuilt, and its notes. */
+function turnHeader({ Box, Text }: PaneUi, turn: Shown) {
+  return (
+    <Box key="header" flexDirection="column">
+      <Text bold>
+        T{turn.turn} · {count(turn.files.length)} · {counts(Text, totals(turn.files))}
+      </Text>
+      {turn.prompt !== '' && (
+        <Text dimColor wrap="truncate-end">
+          {turn.prompt}
+        </Text>
+      )}
+      {turn.isRebuilt === true && (
+        <Text dimColor>Rebuilt from the transcript: Edit, Write and NotebookEdit calls only; line endings not compared.</Text>
+      )}
+      {(turn.notes ?? []).map(note => (
+        <Text color="warning">{note}</Text>
+      ))}
+    </Box>
+  )
+}
+
+/** One row per file: its path cut to fit, which turns to the file's page, then its counts and badges. */
+function fileRows({ Box, Button, Text }: PaneUi, files: readonly FileDiff[], width: number, show: (i: number) => unknown) {
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {files.map((file, i) => {
+        const tail = [`+${file.added} −${file.removed}`, ...file.badges].join('  ').length
+        return (
+          <Box key={`line-${i}`} justifyContent="space-between" gap={2}>
+            <Button key={`row-${i}`} plain label={fit(file.path, width - tail - 2)} onPress={() => show(i)} />
+            {counts(Text, file, file.badges)}
+          </Box>
+        )
+      })}
+    </Box>
+  )
+}
+
+/** Prev and Next around the page number, `at` of `last`, both counted from 0. */
+function pager({ Box, Button, Text }: PaneUi, $: EngineInterface, at: number, last: number) {
+  return (
+    <Box gap={1} marginTop={1}>
+      {at > 0 && <Button key="prev" label="Prev" onPress={() => update($, page, p => Math.max(0, Math.min(p, last) - 1))} />}
+      <Text dimColor>
+        Page {at + 1} of {last + 1}
+      </Text>
+      {at < last && <Button key="next" label="Next" onPress={() => update($, page, p => Math.min(p + 1, last))} />}
+    </Box>
+  )
+}
+
+/** A file's share of a page: its diff text plus a cost per run and header, or its images plus a cost per hunk. */
+function pageSize(file: FileDiff, framed: FileRuns | undefined, drawing: Drawing | undefined): number {
+  if (framed !== undefined) {
+    const parts = framed.hunks.reduce((n, hunk) => n + 1 + hunk.runs.length, 0)
+    return textSize(file.hunks) + RUN_COST * parts
+  }
+  if (drawing === undefined) return textSize(file.hunks)
+  let size = 0
+  for (const hunk of drawing.hunks) {
+    size += HUNK_COST
+    for (const image of hunk.images) size += image.length
+  }
+  return size
+}
+
+/**
+ * A file's hunks as numbered, selectable `Code`, one per run of lines, removed and added runs framed. The marker is
+ * part of the code, so a copy takes it too: Desktop's gutter takes nothing of a mod's.
+ */
+function framedHunks({ Box, Code, Text }: PaneUi, file: FileDiff, framed: FileRuns): JSX.Element[] {
+  return framed.hunks.map(hunk => (
+    // the gap keeps a red frame's edge off a green one's, which together read as one yellow line;
+    // Desktop counts a number in half lines: 0.4 of a 10 px half line is 4 px, half its smallest step (xs)
+    <Box flexDirection="column" gap={0.4}>
+      <Text dimColor>{hunk.header}</Text>
+      {hunk.runs.map(run => {
+        const source = clean(run.lines.map(line => `${run.kind} ${line}`).join('\n'))
+        const code = <Code path={file.path} startLine={run.start} source={source} />
+        if (run.kind === ' ') return code
+        // Desktop pads a frame unless told not to: the frame hugs the code
+        return (
+          <Box borderStyle="single" borderColor={run.kind === '-' ? 'error' : 'success'} paddingX={0} paddingY={0}>
+            {code}
+          </Box>
+        )
+      })}
+    </Box>
+  ))
+}
+
+/**
+ * A file's hunks as SVG images under their `@@` lines. An image can't be selected: Copy puts the hunk's lines as they
+ * are now on the clipboard.
+ */
+function svgHunks(
+  { Box, Button, Text }: PaneUi,
+  Svg: SvgElement,
+  $: EngineInterface,
+  file: FileDiff,
+  i: number,
+  drawing: Drawing,
+): JSX.Element[] {
+  return drawing.hunks.flatMap((hunk, k) => [
+    <Box justifyContent="space-between" gap={2}>
+      <Text dimColor>{hunk.header}</Text>
+      <Button
+        key={`copy-${i}-${k}`}
+        plain
+        label="Copy"
+        onPress={async press => {
+          const copied = await $.ui.copy({ text: hunk.code, surface: press.surface })
+          const message = copied.isCopied ? `Copied ${hunk.header}` : `Not copied: ${copied.reason}`
+          $.ui.toast(message)
+        }}
+      />
+    </Box>,
+    ...hunk.images.map(source => <Svg source={source} alt={`Diff of ${file.path}, ${hunk.header}`} />),
+  ])
+}
+
+/** A file's hunks as `diff` Code sources. */
+function codeBlocks({ Code }: PaneUi, file: FileDiff): JSX.Element[] {
+  return blocks(file.hunks).map(source => <Code format="diff" path={file.path} source={clean(source)} />)
+}
+
+/** One file on its page: its path and counts between two rules, its notes, then its hunks. */
+function fileSection(
+  { Box, Text }: PaneUi,
+  file: FileDiff,
+  i: number,
+  width: number,
+  notes: readonly string[],
+  hunks: JSX.Element[],
+) {
+  const rule = (
+    <Text dimColor wrap="truncate">
+      {'─'.repeat(width)}
+    </Text>
+  )
+  return (
+    <Box key={`file-${i}`} flexDirection="column" marginTop={1}>
+      {rule}
+      <Box gap={2}>
+        <Text bold>{file.path}</Text>
+        {counts(Text, file, file.badges)}
+      </Box>
+      {rule}
+      {notes.map(note => (
+        <Text dimColor>{note}</Text>
+      ))}
+      {hunks}
+    </Box>
+  )
+}
 
 export const register: Register = (on, options) => {
   /** The turn-start snapshot in flight; module-local, so a reload drops it and the turn goes on without one. */
@@ -519,34 +875,36 @@ export const register: Register = (on, options) => {
    */
   let isDrawn = false
   /** showMemoryAndPlans takes memory and plans back out of what hideClaudeFiles hides. */
-  const hidden: Hidden = options.hideClaudeFiles === false ? 'none' : options.showMemoryAndPlans === true ? 'temp' : 'all'
+  let hidden: Hidden = 'all'
+  if (options.hideClaudeFiles === false) hidden = 'none'
+  else if (options.showMemoryAndPlans === true) hidden = 'temp'
 
   // Also after a hot reload. With shellEdits off nothing runs, and a version control found before is dropped.
   on('session.start', async ($, e, next) => {
     await $.command.register({ name: 'turn-diff', description: "Shows or hides the last turn's file changes" })
     // a change of option reloads the mod: the /config row below may come or go
     $.ui.invalidate('config.describe')
-    const found = options.shellEdits === false ? null : await detect($, e.cwd)
+    let found: Vcs | null = null
+    if (options.shellEdits !== false) found = await detect($, e.cwd)
     await update($, vcs, () => found)
     return next(e)
   })
 
   // With hideClaudeFiles off nothing is hidden, so there is nothing to show again: the row leaves the menu. Its key is
   // `<plugin>.<field>`, the plugin named as installed or as loaded from a folder (`@inline`)
-  on('config.describe', ($, e, next) =>
-    next(
-      options.hideClaudeFiles === false && /^last-turn-diff(?:@[^.]*)?\.showMemoryAndPlans$/.test(e.key) ? { ...e, isHidden: true } : e,
-    ),
-  )
+  on('config.describe', ($, e, next) => {
+    const isMemoryRow = /^last-turn-diff(?:@[^.]*)?\.showMemoryAndPlans$/.test(e.key)
+    if (options.hideClaudeFiles === false && isMemoryRow) return next({ ...e, isHidden: true })
+    return next(e)
+  })
 
   // A /clear or a resume goes on with another conversation, under another id, and raises no session.start.
   on('session.end', async ($, e, next) => {
     if (e.reason === 'clear' || e.reason === 'resume') {
       history.ended = e.sessionId
       await update($, lastTurn, () => null)
-      await update($, later, () => [])
-      await update($, picked, () => null)
-      await update($, page, () => 0)
+      await update($, quietPrompts, () => [])
+      await resetView($)
     }
     return next(e)
   })
@@ -559,19 +917,20 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'turn-diff' }, async $ => {
-    const seen = await sight($, isDrawn)
+    const state = await paneState($, isDrawn)
     // close only what is on screen: an open pane left unplaced, behind another tab or behind the diff panel stays
-    if (seen === 'drawn') {
+    if (state === 'drawn') {
       await $.ui.close({ id: PANE })
       return { text: 'Closed the last-turn diff.' }
     }
-    await update($, picked, () => null)
-    await update($, page, () => 0)
-    if (seen === 'closed') isDrawn = false
+    await resetView($)
+    if (state === 'closed') isDrawn = false
     const opened = await $.ui.open({ id: PANE, title: TITLE })
-    const why = !opened.isPlaced ? `no pane shown: ${opened.reason}` : seen === 'covered' ? COVERED : undefined
-    const turn = (await shown($, history, options.turnHistory !== false, hidden)).turn
-    return { text: describe(turn) + (why === undefined ? '' : ` (${why})`) }
+    let why = ''
+    if (!opened.isPlaced) why = ` (no pane shown: ${opened.reason})`
+    else if (state === 'covered') why = ` (${COVERED})`
+    const { turn } = await shown($, history, options.turnHistory !== false, hidden)
+    return { text: describe(turn) + why }
   })
 
   // Only the main loop raises turn.start; a subagent's run and a local slash command do not.
@@ -591,62 +950,74 @@ export const register: Register = (on, options) => {
 
   on('tool.call', async ($, e, next) => {
     // Claude's own edits read their file before they run, so need no snapshot; the rest wait for it, a while
-    if (e.tool !== 'Edit' && e.tool !== 'Write' && e.tool !== 'NotebookEdit') await settle($, snapshotting)
+    const isEdit = e.tool === 'Edit' || e.tool === 'Write' || e.tool === 'NotebookEdit'
+    if (!isEdit) await settle($, snapshotting)
     if (e.tool === 'Bash' || e.tool === 'PowerShell') {
       // background commands included: they may still be running when the turn ends
       const isCmBusy = CM_MOVES.test(e.command)
-      await update($, recording, rec =>
-        rec === null ? rec : { ...rec, hasShellRun: true, ...(isCmBusy ? { isCmBusy } : {}) },
-      )
+      await update($, recording, rec => {
+        if (rec === null) return rec
+        return { ...rec, hasShellRun: true, ...(isCmBusy ? { isCmBusy } : {}) }
+      })
     }
-    const call = { from: await $.clock.now() }
+    const from = await $.clock.now()
+    const call = { from }
     running.add(call)
     const ran = await next(e).finally(() => running.delete(call))
     // read-only: Read, Grep, a Bash `ls`, a subagent's launch (its own calls are timed); no PowerShell command yet
     if (ran.deny !== undefined || ran.isReadOnly === true) return ran
     // one moved to the background (asked, Ctrl+B, a timeout) counts as running to the turn's end
-    const isBackground = (ran.result as { backgroundTaskId?: string } | undefined)?.backgroundTaskId !== undefined
-    const to = isBackground ? undefined : await $.clock.now()
-    await update($, recording, rec =>
-      rec === null ? rec : { ...rec, runs: [...(rec.runs ?? []), { ...call, ...(to === undefined ? {} : { to }) }] },
-    )
+    const result = ran.result as { backgroundTaskId?: string } | undefined
+    const isBackground = result?.backgroundTaskId !== undefined
+    const done: ToolRun = { ...call }
+    if (!isBackground) done.to = await $.clock.now()
+    await update($, recording, rec => {
+      if (rec === null) return rec
+      return { ...rec, runs: [...(rec.runs ?? []), done] }
+    })
     return ran
   }).catch(($, e, next) => next(e)) // never blocks a tool, nor runs one twice: past next(e) it replays its result
 
   on('tool.call', { tool: ['Edit', 'Write', 'NotebookEdit'] }, async ($, e, next) => {
-    const open = await read($, recording)
-    if (open === null) return next(e)
+    const rec = await read($, recording)
+    if (rec === null) return next(e)
     const path = e.tool === 'NotebookEdit' ? e.notebook_path : e.file_path
     const id = fileKey(path)
     // The tools' originalFile comes back with CRLF turned into LF, so the before is read from disk, unless the turn
     // holds the file already. A turn-start snapshot still running may read the file after this call changed it: the
     // before read here wins over that
-    const isMine = (await read($, { ...PENDING, id }))?.turnId !== open.turnId
-    const before = isMine ? await snapshot($, path) : undefined
+    const earlier = await read($, { ...PENDING, id })
+    const isHeld = earlier?.turnId === rec.turnId
+    let before: Snapshot
+    if (!isHeld) before = await snapshot($, path)
     const ran = await next(e)
     if (ran.deny !== undefined || ran.isError === true) return ran
     const result = ran.result as { staged?: boolean; structuredPatch?: readonly Hunk[] } | undefined
     if (result?.staged === true) return ran
-    const lines = (result?.structuredPatch ?? []).flatMap(h => h.lines)
-    const added = lines.filter(line => line.startsWith('+')).length
-    const removed = lines.filter(line => line.startsWith('-')).length
-    await update($, { ...PENDING, id }, held =>
-      held?.turnId === open.turnId && (held.isEdited === true || !isMine)
-        ? { ...held, added: held.added + added, removed: held.removed + removed, isEdited: true }
-        : {
-            turnId: open.turnId,
-            path,
-            before: before === null ? '' : (before ?? null),
-            isNew: before === null,
-            added,
-            removed,
-            isEdited: true,
-            ...(open.hasShellRun === true ? { isAfterShell: true } : {}),
-          },
-    )
-    await update($, recording, rec =>
-      rec?.turnId === open.turnId && !rec.keys.includes(id) ? { ...rec, keys: [...rec.keys, id] } : rec,
-    )
+    const patch = result?.structuredPatch ?? []
+    const { added, removed } = countChanges(patch.flatMap(h => h.lines))
+    await update($, { ...PENDING, id }, pending => {
+      if (pending?.turnId === rec.turnId) {
+        // an earlier Edit counted it, or the turn-start status listed it before this call: its before stays
+        const isCounted = pending.isEdited === true || isHeld
+        if (isCounted) {
+          return { ...pending, added: pending.added + added, removed: pending.removed + removed, isEdited: true }
+        }
+      }
+      return {
+        turnId: rec.turnId,
+        path,
+        ...beforeOf(before),
+        added,
+        removed,
+        isEdited: true,
+        ...(rec.hasShellRun === true ? { isAfterShell: true } : {}),
+      }
+    })
+    await update($, recording, current => {
+      if (current?.turnId !== rec.turnId || current.keys.includes(id)) return current
+      return { ...current, keys: [...current.keys, id] }
+    })
     return ran
   })
 
@@ -654,64 +1025,43 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId !== undefined) return next(e)
     const isSnapshotIn = await settle($, snapshotting)
-    const open = await read($, recording)
-    if (open === null) {
+    const rec = await read($, recording)
+    if (rec === null) {
       // a turn started before the mod loaded: the transcript holds one more turn
       forget(history)
-      await passed($, null)
+      await addQuietTurn($, null)
       return next(e)
     }
     // until its end is recorded, a read of the transcript leaves this turn out as a running one
-    history.ending = open.prompt
+    history.ending = rec.prompt
     await update($, recording, () => null)
-    const cwd = await $.session.cwd()
-    const notes = [...(open.notes ?? [])]
+    const notes = [...(rec.notes ?? [])]
     // ponytail: the snapshot stops at its next file, leaving those it got to in `pending` until a later turn replaces them
-    if (!isSnapshotIn && open.base === undefined) notes.push('The turn-start status was still running at turn end: shell changes are not shown.')
-    const touched = new Map<string, PendingFile>()
-    for (const id of open.keys) {
-      const held = await read($, { ...PENDING, id })
-      await update($, { ...PENDING, id }, () => null)
-      if (held?.turnId === open.turnId) touched.set(id, held)
+    if (!isSnapshotIn && rec.base === undefined) {
+      notes.push('The turn-start status was still running at turn end: shell changes are not shown.')
     }
-    const repo = await read($, vcs)
-    if (repo !== null && open.base !== undefined) {
-      for (const [id, file] of await shellFiles($, repo, open, touched, notes)) touched.set(id, file)
-    }
-    const roots = touched.size === 0 ? [] : await claudeOwn($, cwd, hidden)
+    const touched = await collectTouched($, rec, notes)
     // a call still running (a background agent's) counts as running on
-    const runs = [...(open.runs ?? []), ...running]
-    const files: FileDiff[] = []
-    for (const held of touched.values()) {
-      // a scratchpad file, a commit message Claude wrote down: not the turn's work
-      if (isClaudeOwn(roots, cwd, held.path)) continue
-      const now = await $.fs.stat(held.path).catch(() => undefined)
-      // a file recorded by size and mtime is unchanged while both are
-      if (held.stamp !== undefined && now?.size === held.stamp.size && now.mtimeMs === held.stamp.mtimeMs) continue
-      // one only the status lists, written while none of the turn's calls ran: another session's, an editor's
-      if (held.isEdited !== true && !(await isTurnWrite($, open.startedAt, runs, held.path, now?.mtimeMs))) continue
-      const after = await snapshot($, held.path)
-      const file = diffFile({ ...held, path: clean(relativePath(cwd, held.path)), after })
-      if (file !== null) files.push(file)
-    }
+    const runs = [...(rec.runs ?? []), ...running]
+    const files = await diffTouched($, rec, touched, runs, hidden)
     // the transcript holds one more turn: read it again when next shown. `ending` goes before the write to `lastTurn`:
     // a draw between them reads this turn in the transcript, and the write draws again with it counted
     forget(history)
     history.ending = undefined
     // a note says shell changes may be missing: it counts only where a shell command ran
-    if (files.length === 0 && (notes.length === 0 || open.hasShellRun !== true)) {
+    const hasShellNote = notes.length > 0 && rec.hasShellRun === true
+    if (files.length === 0 && !hasShellNote) {
       // the last turn, its pick and page stay on show; the band goes
-      await passed($, open.prompt)
+      await addQuietTurn($, rec.prompt)
       await update($, isBandHidden, () => true)
       return next(e)
     }
     // a shown pane draws the new turn; one behind the diff panel does not
     isDrawn = false
-    await update($, later, () => [])
-    await update($, lastTurn, () => ({ turn: open.turn, prompt: open.prompt, files, notes }))
+    await update($, quietPrompts, () => [])
+    await update($, lastTurn, () => ({ turn: rec.turn, prompt: rec.prompt, files, notes }))
     await update($, isBandHidden, () => false)
-    await update($, page, () => 0)
-    await update($, picked, () => null)
+    await resetView($)
     // An unasked open waits undrawn below 144 columns; /turn-diff shows it then.
     if (options.autoOpen === true && files.length > 0) await $.ui.open({ id: PANE, title: TITLE })
     return next(e)
@@ -720,60 +1070,13 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
     if (e.surface === 'mobile') return next(e)
     isDrawn = true
-    const { Box, Button, Code, Select, Text } = $.ui.resolve(e)
+    const ui = $.ui.resolve(e)
+    const { Box, Text } = ui
     const { turn, entries } = await shown($, history, options.turnHistory !== false, hidden)
     if (turn === null) return <Text dimColor>{NO_TURN}</Text>
-    const picker = entries.length > 1 && (
-      <Select
-        key="turn"
-        label="Turn"
-        options={entries.slice(-PICKS).map(t => ({
-          value: String(t.turn),
-          label: [`T${t.turn}`, count(t.files), ...(t.prompt === '' ? [] : [short(t.prompt)])].join(' · '),
-        }))}
-        value={String(turn.turn)}
-        onSelect={async value => {
-          const i = entries.findIndex(t => String(t.turn) === value)
-          await update($, picked, () => (i < 0 ? null : { prompt: entries[i]!.prompt, fromEnd: entries.length - i }))
-          await update($, page, () => 0)
-        }}
-      />
-    )
     const width = e.props.bodyColumns
-    const rule = (
-      <Text dimColor wrap="truncate">
-        {'─'.repeat(width)}
-      </Text>
-    )
-    /** `+a −r`, colored, then the badges dim. */
-    const counts = (changes: { added: number; removed: number }, badges: readonly string[] = []) => (
-      <Text>
-        <Text color="success">+{changes.added}</Text> <Text color="error">−{changes.removed}</Text>
-        {badges.map(badge => (
-          <Text dimColor>{`  ${badge}`}</Text>
-        ))}
-      </Text>
-    )
-    const all = totals(turn.files)
-    const header = (
-      <Box key="header" flexDirection="column">
-        <Text bold>
-          T{turn.turn} · {count(turn.files.length)} · <Text color="success">+{all.added}</Text>{' '}
-          <Text color="error">−{all.removed}</Text>
-        </Text>
-        {turn.prompt !== '' && (
-          <Text dimColor wrap="truncate-end">
-            {turn.prompt}
-          </Text>
-        )}
-        {turn.isRebuilt === true && (
-          <Text dimColor>Rebuilt from the transcript: Edit, Write and NotebookEdit calls only; line endings not compared.</Text>
-        )}
-        {(turn.notes ?? []).map(note => (
-          <Text color="warning">{note}</Text>
-        ))}
-      </Box>
-    )
+    const picker = turnPicker(ui, $, turn, entries)
+    const header = turnHeader(ui, turn)
     if (turn.files.length === 0) {
       return (
         <Box flexDirection="column" width={width}>
@@ -786,28 +1089,27 @@ export const register: Register = (on, options) => {
     // Desktop draws a `Code` diff as plain diff text that can't be selected, but numbered `Code` (startLine) as selectable
     // code with Desktop's own colors: with selectableDiffs each run of lines is one, removed and added runs framed and marked;
     // with svgDiffs each file's hunks are SVG images
-    const runs = e.surface === 'desktop' && options.selectableDiffs === true ? turn.files.map(f => runHunks(f.hunks)) : undefined
-    const Svg = e.surface === 'desktop' && runs === undefined && options.svgDiffs !== false ? $.ui.resolve(e).Svg : undefined
+    const isDesktop = e.surface === 'desktop'
+    const isSelectable = isDesktop && options.selectableDiffs === true
+    const runs = isSelectable ? turn.files.map(f => runHunks(f.hunks)) : undefined
+    const isSvg = isDesktop && runs === undefined && options.svgDiffs !== false
+    // resolved once e.surface is known to be desktop: the terminal has no Svg
+    const Svg = isSvg ? $.ui.resolve(e).Svg : undefined
     // drawn by the turn and the pane's width, so turning a page draws nothing again; dropped with what was read of the
     // transcript, whose numbers it holds. ponytail: a turn is known by its number, prompt and per-file counts; a content
     // hash if two ever collide
-    const key = [width, turn.turn, turn.prompt, ...turn.files.map(f => `${f.path} ${f.added} ${f.removed}`)].join('\n')
+    const fileCounts = turn.files.map(f => `${f.path} ${f.added} ${f.removed}`)
+    const key = [width, turn.turn, turn.prompt, ...fileCounts].join('\n')
     if (Svg !== undefined && history.drawn?.key !== key) {
       history.drawn = { key, files: turn.files.map(file => drawHunks(file.path, file.hunks, width)) }
     }
     const svgs = Svg === undefined ? undefined : history.drawn!.files
-    const pages = paginate(
-      turn.files.map((file, i) =>
-        runs !== undefined
-          ? textSize(file.hunks) + RUN_COST * runs[i]!.hunks.reduce((n, hunk) => n + 1 + hunk.runs.length, 0)
-          : svgs === undefined
-            ? textSize(file.hunks)
-            : svgs[i]!.hunks.reduce((sum, hunk) => sum + HUNK_COST + hunk.images.reduce((n, image) => n + image.length, 0), 0),
-      ),
-      svgs === undefined ? PAGE_BUDGET : SVG_PAGE_BUDGET,
-    )
+    const sizes = turn.files.map((file, i) => pageSize(file, runs?.[i], svgs?.[i]))
+    const budget = svgs === undefined ? PAGE_BUDGET : SVG_PAGE_BUDGET
+    const pages = paginate(sizes, budget)
     const last = pages.length - 1
-    const at = Math.min(await read($, page), last)
+    const wanted = await read($, page)
+    const at = Math.min(wanted, last)
     const show = async (i: number) => {
       await update($, page, () => pages.findIndex(files => files.includes(i)))
       // best effort: the page has switched whether or not the surface scrolls
@@ -817,85 +1119,18 @@ export const register: Register = (on, options) => {
       <Box flexDirection="column" width={width}>
         {picker}
         {header}
-        <Box flexDirection="column" marginTop={1}>
-          {turn.files.map((file, i) => {
-            const tail = [`+${file.added} −${file.removed}`, ...file.badges].join('  ').length
-            return (
-              <Box key={`line-${i}`} justifyContent="space-between" gap={2}>
-                <Button key={`row-${i}`} plain label={fit(file.path, width - tail - 2)} onPress={() => show(i)} />
-                {counts(file, file.badges)}
-              </Box>
-            )
-          })}
-        </Box>
-        {last > 0 && (
-          <Box gap={1} marginTop={1}>
-            {at > 0 && <Button key="prev" label="Prev" onPress={() => update($, page, p => Math.max(0, Math.min(p, last) - 1))} />}
-            <Text dimColor>
-              Page {at + 1} of {last + 1}
-            </Text>
-            {at < last && <Button key="next" label="Next" onPress={() => update($, page, p => Math.min(p + 1, last))} />}
-          </Box>
-        )}
+        {fileRows(ui, turn.files, width, show)}
+        {last > 0 && pager(ui, $, at, last)}
         {(pages[at] ?? []).map(i => {
           const file = turn.files[i]!
-          const drawing = svgs?.[i]
           const framed = runs?.[i]
-          return (
-            <Box key={`file-${i}`} flexDirection="column" marginTop={1}>
-              {rule}
-              <Box gap={2}>
-                <Text bold>{file.path}</Text>
-                {counts(file, file.badges)}
-              </Box>
-              {rule}
-              {withHidden(file.notes, (drawing ?? framed)?.hidden ?? 0).map(note => (
-                <Text dimColor>{note}</Text>
-              ))}
-              {framed !== undefined
-                ? framed.hunks.map(hunk => (
-                    // the gap keeps a red frame's edge off a green one's, which together read as one yellow line;
-                    // Desktop counts a number in half lines: 0.4 of a 10 px half line is 4 px, half its smallest step (xs)
-                    <Box flexDirection="column" gap={0.4}>
-                      <Text dimColor>{hunk.header}</Text>
-                      {hunk.runs.map(run => {
-                        // the marker is part of the code, so a copy takes it too: Desktop's gutter takes nothing of a mod's
-                        const source = clean(run.lines.map(line => `${run.kind} ${line}`).join('\n'))
-                        const code = <Code path={file.path} startLine={run.start} source={source} />
-                        // Desktop pads a frame unless told not to: the frame hugs the code
-                        return run.kind === ' ' ? code : (
-                          <Box
-                            borderStyle="single"
-                            borderColor={run.kind === '-' ? 'error' : 'success'}
-                            paddingX={0}
-                            paddingY={0}
-                          >
-                            {code}
-                          </Box>
-                        )
-                      })}
-                    </Box>
-                  ))
-                : Svg !== undefined && drawing !== undefined
-                ? drawing.hunks.flatMap((hunk, k) => [
-                    // an image can't be selected: Copy puts the hunk's lines as they are now on the clipboard
-                    <Box justifyContent="space-between" gap={2}>
-                      <Text dimColor>{hunk.header}</Text>
-                      <Button
-                        key={`copy-${i}-${k}`}
-                        plain
-                        label="Copy"
-                        onPress={async press => {
-                          const copied = await $.ui.copy({ text: hunk.code, surface: press.surface })
-                          $.ui.toast(copied.isCopied ? `Copied ${hunk.header}` : `Not copied: ${copied.reason}`)
-                        }}
-                      />
-                    </Box>,
-                    ...hunk.images.map(source => <Svg source={source} alt={`Diff of ${file.path}, ${hunk.header}`} />),
-                  ])
-                : blocks(file.hunks).map(source => <Code format="diff" path={file.path} source={clean(source)} />)}
-            </Box>
-          )
+          const drawing = svgs?.[i]
+          const notes = notesOf(file, (drawing ?? framed)?.hidden ?? 0)
+          let hunks: JSX.Element[]
+          if (framed !== undefined) hunks = framedHunks(ui, file, framed)
+          else if (Svg !== undefined && drawing !== undefined) hunks = svgHunks(ui, Svg, $, file, i, drawing)
+          else hunks = codeBlocks(ui, file)
+          return fileSection(ui, file, i, width, notes, hunks)
         })}
       </Box>
     )
@@ -904,24 +1139,23 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.surface === 'mobile' || e.props.hasSurvey || e.props.isWorking) return next(e)
     const turn = await read($, lastTurn)
-    if (turn === null || turn.files.length === 0 || (await read($, isBandHidden))) return next(e)
+    if (turn === null || turn.files.length === 0) return next(e)
+    const isHidden = await read($, isBandHidden)
+    if (isHidden) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
-    const all = totals(turn.files)
     return (
       <Box gap={1}>
         <Text>
-          Last turn: {count(turn.files.length)} <Text color="success">+{all.added}</Text>{' '}
-          <Text color="error">−{all.removed}</Text>
+          Last turn: {count(turn.files.length)} {counts(Text, totals(turn.files))}
         </Text>
         <Button
           key="view"
           label="View"
           onPress={async () => {
-            await update($, picked, () => null)
-            await update($, page, () => 0)
-            const seen = await sight($, isDrawn)
-            if (seen === 'covered') await $.ui.toast(`The Last turn pane is ${COVERED}.`)
-            if (seen !== 'closed') return
+            await resetView($)
+            const state = await paneState($, isDrawn)
+            if (state === 'covered') await $.ui.toast(`The Last turn pane is ${COVERED}.`)
+            if (state !== 'closed') return
             isDrawn = false
             await $.ui.open({ id: PANE, title: TITLE })
           }}

@@ -70,6 +70,18 @@ world answered by the test's own `on` hooks; `tests/transcript.ts` builds transc
 
 When the types don't say how the engine behaves, probe it with a throwaway mod under `claude -p --plugin-dir <probe>`.
 
+## Code style
+
+One step per line, so a line can be read without unpacking it:
+
+- Await into a named `const`, then use it: `const held = await read($, { ...PENDING, id })`, and on the next line
+  `const isHeld = held?.turnId === open.turnId`. A test's assertion may await inline: `expect((await pane($)).header)`.
+- Branch with `if`/`else` and early returns. A ternary is a two-way pick between short expressions on one line, with
+  no ternary or `await` inside; three or more cases are an `if` chain, or a small function of early returns.
+- Name a condition that mixes `&&` and `||`, then test the name:
+  `const isEditFirst = held !== undefined && held.isAfterShell !== true`.
+- `++`, `--` and assignments are statements of their own, outside indexes, arguments and conditions.
+
 ## Conventions
 
 Commit subjects are one imperative sentence naming the user-visible change, such as "Keep Claude's edits when the

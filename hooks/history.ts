@@ -1,7 +1,7 @@
 import type { SessionMessage, ToolUseSummary } from 'claude-code'
 
 import type { FileDiff, Hunk } from '../types'
-import { capHunks, clean, cut, diffFile, fileKey, relativePath } from './diff'
+import { capHunks, clean, countChanges, cut, diffFile, fileKey, relativePath } from './diff'
 
 /** One turn of the transcript: numbered from the oldest one it holds, its prompt line and its tool calls in order. */
 export type TranscriptTurn = { turn: number; prompt: string; uses: ToolUseSummary[] }
@@ -17,13 +17,20 @@ const NO_TURN =
 /** The prompt's first line as the pane shows it: a background task's summary for its notification, `/name args` for a skill. */
 export function promptLine(text: string): string {
   const skill = /^\s*<command-message>[\s\S]*?<command-name>([^<]*)<\/command-name>(?:\s*<command-args>([^<]*)<\/command-args>)?/.exec(text)
-  const line = text.trimStart().startsWith('<task-notification>')
-    ? /<summary>([^<]*)<\/summary>/.exec(text)?.[1]?.trim() || 'Background task finished'
-    : skill !== null ? `${skill[1]} ${skill[2] ?? ''}`
+  let line: string
+  if (text.trimStart().startsWith('<task-notification>')) {
+    const summary = /<summary>([^<]*)<\/summary>/.exec(text)?.[1]?.trim()
+    line = summary || 'Background task finished'
+  } else if (skill !== null) {
+    line = `${skill[1]} ${skill[2] ?? ''}`
+  } else {
     // Desktop wraps a pasted prompt in `<pasted_content id="…">` tags: show the text, not the tag
-    : text.replace(/<\/?pasted_content(?:\s[^>]*)?>/g, '')
+    line = text.replace(/<\/?pasted_content(?:\s[^>]*)?>/g, '')
+  }
+  const first = line.split('\n').find(one => one.trim() !== '') ?? ''
   // cut by code points, so no emoji is cut in half
-  return clean([...(line.split('\n').find(one => one.trim() !== '') ?? '').trim()].slice(0, 200).join(''))
+  const points = [...first.trim()].slice(0, 200)
+  return clean(points.join(''))
 }
 
 /**
@@ -33,10 +40,13 @@ export function promptLine(text: string): string {
 export function turnsOf(messages: readonly SessionMessage[]): TranscriptTurn[] {
   const turns: TranscriptTurn[] = []
   for (const message of messages) {
-    if (message.role === 'assistant') turns[turns.length - 1]?.uses.push(...message.toolUses)
-    else if ((message.toolResults ?? []).length === 0 && !NO_TURN.test(message.text.trimStart())) {
-      turns.push({ turn: turns.length + 1, prompt: promptLine(message.text), uses: [] })
+    if (message.role === 'assistant') {
+      turns[turns.length - 1]?.uses.push(...message.toolUses)
+      continue
     }
+    const hasResults = (message.toolResults ?? []).length > 0
+    if (hasResults || NO_TURN.test(message.text.trimStart())) continue
+    turns.push({ turn: turns.length + 1, prompt: promptLine(message.text), uses: [] })
   }
   return turns
 }
@@ -45,19 +55,24 @@ const str = (value: unknown) => (typeof value === 'string' ? value : undefined)
 const lf = (text: string) => text.replace(/\r\n/g, '\n')
 
 /** The file an Edit, Write or NotebookEdit call names; undefined for any other tool. */
-export const pathOf = (use: ToolUseSummary) =>
-  use.tool === 'NotebookEdit' ? str(use.input.notebook_path)
-  : use.tool === 'Edit' || use.tool === 'Write' ? str(use.input.file_path)
-  : undefined
+export function pathOf(use: ToolUseSummary): string | undefined {
+  if (use.tool === 'NotebookEdit') return str(use.input.notebook_path)
+  if (use.tool === 'Edit' || use.tool === 'Write') return str(use.input.file_path)
+  return undefined
+}
 
 /** The turn's Edit, Write and NotebookEdit calls that ran (not denied, errored or staged), by file as first touched. */
 export function editsOf(uses: readonly ToolUseSummary[]): Map<string, ToolUseSummary[]> {
   const files = new Map<string, ToolUseSummary[]>()
   for (const use of uses) {
     const path = pathOf(use)
+    if (path === undefined) continue
     const isStaged = (use.result as { staged?: unknown } | undefined)?.staged === true
-    if (path === undefined || use.isError === true || use.text === undefined || isStaged) continue
-    files.set(fileKey(path), [...(files.get(fileKey(path)) ?? []), use])
+    const hasRun = use.isError !== true && use.text !== undefined && !isStaged
+    if (!hasRun) continue
+    const key = fileKey(path)
+    const calls = files.get(key) ?? []
+    files.set(key, [...calls, use])
   }
   return files
 }
@@ -90,11 +105,17 @@ function rebuildFile(path: string, calls: readonly ToolUseSummary[]): FileDiff |
     // as the user left it in the permission dialog
     const old = str(result.oldString) ?? str(use.input.old_string) ?? ''
     // a file Write creates, or an Edit from an empty old_string makes (it takes no file but an absent or empty one)
-    const isMade = use.tool === 'Write' ? result.type === 'create' : use.tool === 'Edit' && old === ''
-    let was = isMade ? '' : use.tool === 'NotebookEdit' ? str(result.original_file) : str(result.originalFile)
+    let isMade = false
+    if (use.tool === 'Write') isMade = result.type === 'create'
+    else if (use.tool === 'Edit') isMade = old === ''
+    let was: string | undefined
+    if (isMade) was = ''
+    else if (use.tool === 'NotebookEdit') was = str(result.original_file)
+    else was = str(result.originalFile)
     // a stripped record (headless, or older than the ones Claude Code keeps whole) blanks originalFile: '' is not a
     // file the call found text in (old lines in its patch, an old_string)
-    if (was === '' && (patch.some(h => h.oldLines > 0) || (use.tool === 'Edit' && old !== ''))) was = undefined
+    const hadText = patch.some(h => h.oldLines > 0) || (use.tool === 'Edit' && old !== '')
+    if (was === '' && hadText) was = undefined
     if (use.tool === 'Write') {
       // a stripped record keeps '' for the content too: the call's input still holds it
       const content = str(result.content) || str(use.input.content)
@@ -105,8 +126,11 @@ function rebuildFile(path: string, calls: readonly ToolUseSummary[]): FileDiff |
       // its own before wins over the text so far: a shell command may have changed the file in between
       const base = was === undefined ? text : lf(was)
       // as the tool applies it: deleting text that ends a line takes the line's newline with it
-      const cut = now === '' && !old.endsWith('\n') && base?.includes(`${old}\n`) === true ? `${old}\n` : old
-      text = base?.includes(cut) ? (isAll ? base.split(cut).join(now) : base.replace(cut, () => now)) : undefined
+      const takesNewline = now === '' && !old.endsWith('\n') && base?.includes(`${old}\n`) === true
+      const cut = takesNewline ? `${old}\n` : old
+      if (base === undefined || !base.includes(cut)) text = undefined
+      else if (isAll) text = base.split(cut).join(now)
+      else text = base.replace(cut, () => now)
     } else {
       const updated = str(result.updated_file)
       text = updated === undefined ? undefined : lf(updated)
@@ -117,17 +141,23 @@ function rebuildFile(path: string, calls: readonly ToolUseSummary[]): FileDiff |
     }
     patches.push(...patch)
   })
-  const added = patches.reduce((sum, h) => sum + h.lines.filter(line => line.startsWith('+')).length, 0)
-  const removed = patches.reduce((sum, h) => sum + h.lines.filter(line => line.startsWith('-')).length, 0)
+  const { added, removed } = countChanges(patches.flatMap(h => h.lines))
   if (before !== undefined && text !== undefined) return diffFile({ path, before, after: text, isNew, added, removed })
-  const notes =
-    patches.length === 0 ? ['no diff in the transcript']
-    : calls.length > 1 ? ['shown call by call: the transcript keeps no copy of this file']
-    : []
-  return { path, added, removed, badges: isNew ? ['new'] : [], notes, hunks: capHunks(patches, notes) }
+  const notes: string[] = []
+  if (patches.length === 0) notes.push('no diff in the transcript')
+  else if (calls.length > 1) notes.push('shown call by call: the transcript keeps no copy of this file')
+  const badges = isNew ? ['new'] : []
+  const { hunks, hidden } = capHunks(patches)
+  return { path, added, removed, badges, notes, hunks, ...(hidden > 0 ? { hidden } : {}) }
 }
 
 /** The files a transcript turn's Edit, Write and NotebookEdit calls changed, paths relative to `cwd`. */
 export function rebuildFiles(uses: readonly ToolUseSummary[], cwd: string): FileDiff[] {
-  return [...editsOf(uses).values()].flatMap(calls => rebuildFile(clean(relativePath(cwd, pathOf(calls[0]!)!)), calls) ?? [])
+  const files: FileDiff[] = []
+  for (const calls of editsOf(uses).values()) {
+    const path = clean(relativePath(cwd, pathOf(calls[0]!)!))
+    const file = rebuildFile(path, calls)
+    if (file !== null) files.push(file)
+  }
+  return files
 }

@@ -169,11 +169,13 @@ function world(
   const changes = () => {
     const at = revs.get(head)!
     const keys = new Set([...at.keys(), ...tree(disk).keys()])
-    return [...keys].sort().flatMap(key => {
+    return [...keys].sort().flatMap((key): [string, 'new' | 'deleted' | 'changed'][] => {
       const now = disk.get(key)
       const was = at.get(key)
       if (now === was) return []
-      return [[key, was === undefined ? 'new' : now === undefined ? 'deleted' : 'changed'] as const]
+      if (was === undefined) return [[key, 'new']]
+      if (now === undefined) return [[key, 'deleted']]
+      return [[key, 'changed']]
     })
   }
   const answer = (exitCode: number, stdout = '') => ({
@@ -191,8 +193,10 @@ function world(
     if (verb === 'cat-file') {
       const [rev, path] = rest[rest.length - 1]!.split(':') as [string, string]
       const text = revs.get(rev)?.get(norm(ROOT + path))
+      if (text === undefined) return answer(128)
+      if (rest.includes('--filters')) return answer(0, text)
       // without --filters git drops the CRLF checkout writes, as `git show` does
-      return text === undefined ? answer(128) : answer(0, rest.includes('--filters') ? text : text.replace(/\r\n/g, '\n'))
+      return answer(0, text.replace(/\r\n/g, '\n'))
     }
     if (verb === 'merge-base') {
       let at: string | undefined = rest[2]
@@ -202,7 +206,12 @@ function world(
     if (verb === 'diff') {
       const [from, to] = [revs.get(rest[rest.length - 2]!)!, revs.get(rest[rest.length - 1]!)!]
       const keys = [...new Set([...from.keys(), ...to.keys()])].filter(key => from.get(key) !== to.get(key))
-      return answer(0, keys.map(key => `${!from.has(key) ? 'A' : !to.has(key) ? 'D' : 'M'}\0${rel(key)}\0`).join(''))
+      const status = (key: string) => {
+        if (!from.has(key)) return 'A'
+        if (!to.has(key)) return 'D'
+        return 'M'
+      }
+      return answer(0, keys.map(key => `${status(key)}\0${rel(key)}\0`).join(''))
     }
     throw new Error(`git ${args.join(' ')}`)
   }
@@ -213,10 +222,15 @@ function world(
     if (verb === 'gwp') return answer(0, 'c:\\proj\r\n')
     if (isStatusBroken === true) return answer(1, 'Authentication failed for org@cloud.')
     if (verb === 'status') {
+      const revisionType = (type: string, key: string) => {
+        if (isBinary.has(key)) return 'enBinaryFile'
+        if (type === 'PR') return ''
+        return 'enTextFile'
+      }
       const record = (type: string, key: string, oldKey = '') =>
         `<Change><Type>${type}</Type><Path>${xmlText(rel(key).replace(/\//g, '\\'))}</Path>` +
         `<OldPath>${xmlText(rel(oldKey).replace(/\//g, '\\'))}</OldPath>` +
-        `<RevisionType>${isBinary.has(key) ? 'enBinaryFile' : type === 'PR' ? '' : 'enTextFile'}</RevisionType></Change>`
+        `<RevisionType>${revisionType(type, key)}</RevisionType></Change>`
       const movedFrom = new Set([...movedTo].filter(([to]) => disk.has(to)).map(([, from]) => from))
       const records = changes().flatMap(([key, kind]) => {
         const from = movedTo.get(key)
@@ -244,9 +258,14 @@ function world(
   let statuses = 0
   on('process.run', async ($, e) => {
     calls.push([...e.argv])
-    if (e.argv.includes('status')) await onStatus?.(++statuses)
+    if (e.argv.includes('status')) {
+      statuses++
+      await onStatus?.(statuses)
+    }
     const [bin, ...args] = e.argv
-    return bin === 'git' ? git(args) : bin === 'cm' ? cm(args) : { deny: `${bin} is not installed` }
+    if (bin === 'git') return git(args)
+    if (bin === 'cm') return cm(args)
+    return { deny: `${bin} is not installed` }
   })
   const commit = (name: string) => {
     revs.set(name, tree(disk))

@@ -35,7 +35,10 @@ export function eolStyle(text: string): 'CRLF' | 'LF' | 'mixed' | 'none' {
     lf++
     if (text[i - 1] === '\r') crlf++
   }
-  return lf === 0 ? 'none' : crlf === 0 ? 'LF' : crlf === lf ? 'CRLF' : 'mixed'
+  if (lf === 0) return 'none'
+  if (crlf === 0) return 'LF'
+  if (crlf === lf) return 'CRLF'
+  return 'mixed'
 }
 
 /**
@@ -79,11 +82,20 @@ export function myers(x: ArrayLike<number>, y: ArrayLike<number>): [number, numb
           const wasAdd = kk === -e || (kk !== e && was[(kk + e - 2) >> 1]! < was[(kk + e) >> 1]!)
           const from = wasAdd ? kk + 1 : kk - 1
           const fromI = was[(from + e - 1) >> 1]!
-          while (i > (wasAdd ? fromI : fromI + 1)) same.push([--i, --j])
+          const matchedFrom = wasAdd ? fromI : fromI + 1
+          while (i > matchedFrom) {
+            i--
+            j--
+            same.push([i, j])
+          }
           i = fromI
           j = fromI - from
         }
-        while (i > 0) same.push([--i, --j])
+        while (i > 0) {
+          i--
+          j--
+          same.push([i, j])
+        }
         return same.reverse()
       }
       if (work > MAX_WORK) return null
@@ -111,7 +123,10 @@ export function diffLines(a: readonly string[], b: readonly string[]): Op[] {
     const ids = new Map<string, number>()
     const id = (line: string) => {
       let value = ids.get(line)
-      if (value === undefined) ids.set(line, (value = ids.size))
+      if (value === undefined) {
+        value = ids.size
+        ids.set(line, value)
+      }
       return value
     }
     return [Int32Array.from(a.slice(start, endA), id), Int32Array.from(b.slice(start, endB), id)]
@@ -119,16 +134,24 @@ export function diffLines(a: readonly string[], b: readonly string[]): Op[] {
   if (n * m > MAX_CELLS) {
     // the lines between two matches as removed, then added; with nothing matched, one delete block and one insert block.
     // A diff changes at least |n - m| lines, so past MAX_EDITS of them Myers isn't even tried.
-    const same = (Math.abs(n - m) > MAX_EDITS ? null : myers(...numbers())) ?? []
+    let same: [number, number][] = []
+    if (Math.abs(n - m) <= MAX_EDITS) same = myers(...numbers()) ?? []
     same.push([n, m])
     let i = 0
     let j = 0
     for (const [toI, toJ] of same) {
-      while (i < toI) ops.push(['-', a[start + i++]!])
-      while (j < toJ) ops.push(['+', b[start + j++]!])
+      while (i < toI) {
+        ops.push(['-', a[start + i]!])
+        i++
+      }
+      while (j < toJ) {
+        ops.push(['+', b[start + j]!])
+        j++
+      }
       // [n, m] only marks the end
       if (i < n) {
-        ops.push([' ', a[start + i++]!])
+        ops.push([' ', a[start + i]!])
+        i++
         j++
       }
     }
@@ -139,20 +162,26 @@ export function diffLines(a: readonly string[], b: readonly string[]): Op[] {
     const lcs = new Uint32Array((n + 1) * w)
     for (let i = n - 1; i >= 0; i--) {
       for (let j = m - 1; j >= 0; j--) {
-        lcs[i * w + j] =
-          x[i] === y[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!)
+        if (x[i] === y[j]) lcs[i * w + j] = lcs[(i + 1) * w + j + 1]! + 1
+        else lcs[i * w + j] = Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!)
       }
     }
     let i = 0
     let j = 0
     while (i < n || j < m) {
-      if (i < n && j < m && x[i] === y[j]) {
-        ops.push([' ', a[start + i++]!])
+      const isSame = i < n && j < m && x[i] === y[j]
+      // dropping x[i] keeps the LCS as long as dropping y[j] does
+      const isRemoved = j === m || (i < n && lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!)
+      if (isSame) {
+        ops.push([' ', a[start + i]!])
+        i++
         j++
-      } else if (j === m || (i < n && lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!)) {
-        ops.push(['-', a[start + i++]!])
+      } else if (isRemoved) {
+        ops.push(['-', a[start + i]!])
+        i++
       } else {
-        ops.push(['+', b[start + j++]!])
+        ops.push(['+', b[start + j]!])
+        j++
       }
     }
   }
@@ -167,9 +196,13 @@ export function toHunks(ops: readonly Op[]): Hunk[] {
   // oldAt[i], newAt[i]: how many old and new lines come before ops[i]
   const oldAt = [0]
   const newAt = [0]
+  let old = 0
+  let now = 0
   for (const [kind] of ops) {
-    oldAt.push(oldAt[oldAt.length - 1]! + (kind === '+' ? 0 : 1))
-    newAt.push(newAt[newAt.length - 1]! + (kind === '-' ? 0 : 1))
+    if (kind !== '+') old++
+    if (kind !== '-') now++
+    oldAt.push(old)
+    newAt.push(now)
   }
   const hunks: Hunk[] = []
   let i = 0
@@ -238,7 +271,8 @@ export function blocks(hunks: readonly Hunk[], max = CODE_CAP): string[] {
   const sources: string[] = []
   for (const text of hunks.map(hunkText)) {
     const last = sources.length - 1
-    if (last >= 0 && sources[last]!.length + 1 + text.length <= max) sources[last] += `\n${text}`
+    const fits = last >= 0 && sources[last]!.length + 1 + text.length <= max
+    if (fits) sources[last] += `\n${text}`
     else sources.push(text)
   }
   return sources
@@ -250,11 +284,14 @@ export const RUN_CAP = 600
 /** Consecutive lines of one kind, numbered from their own side: removed lines by the old file, the rest by the new. */
 export type Run = { kind: ' ' | '-' | '+'; start: number; lines: string[] }
 
+/** A file's hunks as runs, each under its `@@` line; `hidden` counts the changed lines past RUN_CAP. */
+export type FileRuns = { hunks: { header: string; runs: Run[] }[]; hidden: number }
+
 /**
- * A file's hunks as runs, RUN_CAP runs and headers at most; `hidden` counts the changed lines past it.
+ * A file's hunks as runs, RUN_CAP runs and headers at most.
  * A run is cut where its lines, drawn as `${kind} ${line}`, would pass CODE_CAP: the mark adds a character per line.
  */
-export function runHunks(hunks: readonly Hunk[], cap = RUN_CAP): { hunks: { header: string; runs: Run[] }[]; hidden: number } {
+export function runHunks(hunks: readonly Hunk[], cap = RUN_CAP): FileRuns {
   const out: { header: string; runs: Run[] }[] = []
   let left = cap
   let hidden = 0
@@ -279,9 +316,14 @@ export function runHunks(hunks: readonly Hunk[], cap = RUN_CAP): { hunks: { head
       if (kind !== '-') newAt++
     }
     const kept = runs.slice(0, Math.max(0, left - 1))
-    for (const run of runs.slice(kept.length)) if (run.kind !== ' ') hidden += run.lines.length
-    if (kept.length > 0) out.push({ header: hunkHeader(h), runs: kept })
-    left -= kept.length === 0 ? 0 : kept.length + 1
+    for (const run of runs.slice(kept.length)) {
+      if (run.kind !== ' ') hidden += run.lines.length
+    }
+    if (kept.length > 0) {
+      out.push({ header: hunkHeader(h), runs: kept })
+      // the runs and their header
+      left -= kept.length + 1
+    }
   }
   return { hunks: out, hidden }
 }
@@ -305,10 +347,16 @@ export function paginate(sizes: readonly number[], budget: number): number[][] {
   return pages
 }
 
+/** A control character's visible symbol: U+2400 on for C0, U+2421 for DEL. */
+function symbolOf(c: string): string {
+  if (c === '\x7f') return String.fromCharCode(0x2421)
+  return String.fromCharCode(0x2400 + c.charCodeAt(0))
+}
+
 /** Text a surface takes: control characters but tab and newline become their visible symbols, lone surrogates U+FFFD. */
 export function clean(text: string): string {
   return text
-    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, c => String.fromCharCode(c === '\x7f' ? 0x2421 : 0x2400 + c.charCodeAt(0)))
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, symbolOf)
     .replace(/[\x80-\x9f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '�')
 }
 
@@ -328,12 +376,22 @@ export function relativePath(cwd: string, path: string): string {
   return isInside ? file.slice(root.length) : file
 }
 
+/** A file's content as read: its text; null when the file does not exist; undefined when too large or unreadable. */
+export type Snapshot = string | null | undefined
+
+/** How many of the lines are added and how many removed, by their `+` or `-` mark. */
+export function countChanges(lines: readonly string[]): { added: number; removed: number } {
+  const added = lines.filter(line => line.startsWith('+')).length
+  const removed = lines.filter(line => line.startsWith('-')).length
+  return { added, removed }
+}
+
 export type FileInput = {
   path: string
-  /** Before the turn; null when unknown (too large or unreadable). */
+  /** Before the turn; null when unknown (too large or unreadable). A file the turn created is '' with `isNew`. */
   before: string | null
-  /** After the turn; null when the file is gone, undefined when too large or unreadable. */
-  after: string | null | undefined
+  /** After the turn. */
+  after: Snapshot
   isNew: boolean
   /** From the tools' structuredPatch: the counts shown when the file is too large to diff. */
   added: number
@@ -342,26 +400,37 @@ export type FileInput = {
   isBinary?: boolean
 }
 
+/** A file not diffed, as before or after is unknown or past MAX_SIZE: the tools' counts alone. */
+function tooLarge(f: FileInput, badges: readonly string[]): FileDiff {
+  return {
+    path: f.path,
+    added: f.added,
+    removed: f.removed,
+    badges: [...badges, 'too large'],
+    notes: ['too large to diff'],
+    hunks: [],
+  }
+}
+
 /** One file's net change over the turn, or null when there is none. A null before counts as changed. */
 export function diffFile(f: FileInput): FileDiff | null {
   const isDeleted = f.after === null
   if (f.isNew && isDeleted) return null
-  const badges = f.isNew ? ['new'] : isDeleted ? ['deleted'] : []
+  const badges: string[] = []
+  if (f.isNew) badges.push('new')
+  else if (isDeleted) badges.push('deleted')
   const before = f.before
   const after = f.after === null ? '' : f.after
-  if (f.isBinary === true || before?.includes('\0') || after?.includes('\0')) {
+  const isBinary = f.isBinary === true || before?.includes('\0') || after?.includes('\0')
+  if (isBinary) {
     if (before === after && badges.length === 0) return null
     return { path: f.path, added: f.added, removed: f.removed, badges: [...badges, 'binary'], notes: [], hunks: [] }
   }
-  if (before === null || after === undefined || before.length > MAX_SIZE || after.length > MAX_SIZE) {
-    return {
-      path: f.path,
-      added: f.added,
-      removed: f.removed,
-      badges: [...badges, 'too large'],
-      notes: ['too large to diff'],
-      hunks: [],
-    }
+  if (before === null || after === undefined) {
+    return tooLarge(f, badges)
+  }
+  if (before.length > MAX_SIZE || after.length > MAX_SIZE) {
+    return tooLarge(f, badges)
   }
   if (before === after && badges.length === 0) return null
   const ops = diffLines(splitLines(before), splitLines(after))
@@ -374,7 +443,8 @@ export function diffFile(f: FileInput): FileDiff | null {
     badges.push(`${was}→${now}`)
     notes.push(`line endings changed (${was}→${now})`)
   }
-  if (before !== '' && after !== '' && before.endsWith('\n') !== after.endsWith('\n')) {
+  const isEndChanged = before.endsWith('\n') !== after.endsWith('\n')
+  if (before !== '' && after !== '' && isEndChanged) {
     notes.push(after.endsWith('\n') ? 'newline added at end of file' : 'no newline at end of file')
   }
   if (added + removed === 0 && notes.length === 0) {
@@ -386,11 +456,12 @@ export function diffFile(f: FileInput): FileDiff | null {
       notes.push('line endings changed')
     }
   }
-  return { path: f.path, added, removed, badges, notes, hunks: capHunks(toHunks(ops), notes) }
+  const { hunks, hidden } = capHunks(toHunks(ops))
+  return { path: f.path, added, removed, badges, notes, hunks, ...(hidden > 0 ? { hidden } : {}) }
 }
 
-/** The hunks split to fit Code sources and kept up to FILE_CAP; the changed lines past it are counted in `notes`. */
-export function capHunks(all: readonly Hunk[], notes: string[]): Hunk[] {
+/** The hunks split to fit Code sources and kept up to FILE_CAP; `hidden` counts the changed lines past it. */
+export function capHunks(all: readonly Hunk[]): { hunks: Hunk[]; hidden: number } {
   const hunks: Hunk[] = []
   let size = 0
   let hidden = 0
@@ -399,6 +470,5 @@ export function capHunks(all: readonly Hunk[], notes: string[]): Hunk[] {
     if (size <= FILE_CAP) hunks.push(h)
     else hidden += h.lines.filter(line => !line.startsWith(' ')).length
   }
-  if (hidden > 0) notes.push(`${hidden} more changed lines not shown`)
-  return hunks
+  return { hunks, hidden }
 }

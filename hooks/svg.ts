@@ -72,7 +72,10 @@ export function syntaxOf(path: string): RegExp | undefined {
 
 /** One line's colored parts, and whether a `/*` comment is still open at its end. */
 export function lex(line: string, re: RegExp | undefined, isInComment: boolean): [Part[], boolean] {
-  if (re === undefined) return [line === '' ? [] : [['', line]], false]
+  if (re === undefined) {
+    const plain: Part[] = line === '' ? [] : [['', line]]
+    return [plain, false]
+  }
   const parts: Part[] = []
   const add = (cls: string, text: string) => {
     const last = parts[parts.length - 1]
@@ -81,7 +84,8 @@ export function lex(line: string, re: RegExp | undefined, isInComment: boolean):
   }
   let at = 0
   // a hunk can start inside a doc comment: ` * text` and ` */` lines are taken as in one
-  if (isInComment || (re === SLASH && /^\s*\*(?:\s|\/|$)/.test(line))) {
+  const isDocLine = re === SLASH && /^\s*\*(?:\s|\/|$)/.test(line)
+  if (isInComment || isDocLine) {
     const end = line.indexOf('*/')
     if (end === -1) return [[['c', line]], true]
     add('c', line.slice(0, end + 2))
@@ -99,15 +103,7 @@ export function lex(line: string, re: RegExp | undefined, isInComment: boolean):
       add('c', line.slice(m.index, end + 2))
       re.lastIndex = end + 2
     } else {
-      const word = m[5]
-      const cls =
-        m[2] !== undefined ? 'c'
-        : m[3] !== undefined ? 's'
-        : m[4] !== undefined ? 'n'
-        : KEYWORDS.has(word!) ? 'k'
-        : /^[A-Z]/.test(word!) ? 't'
-        : line[re.lastIndex] === '(' ? 'f'
-        : ''
+      const cls = classOf(m, line[re.lastIndex])
       add(cls, m[0])
     }
     at = re.lastIndex
@@ -116,9 +112,26 @@ export function lex(line: string, re: RegExp | undefined, isInComment: boolean):
   return [parts, false]
 }
 
+/** The color class of a lexer match other than a block comment (see Part); `next` is the character after it. */
+function classOf(m: RegExpExecArray, next: string | undefined): string {
+  if (m[2] !== undefined) return 'c'
+  if (m[3] !== undefined) return 's'
+  if (m[4] !== undefined) return 'n'
+  const word = m[5]!
+  if (KEYWORDS.has(word)) return 'k'
+  if (/^[A-Z]/.test(word)) return 't'
+  if (next === '(') return 'f'
+  return ''
+}
+
 /** Tabs as spaces to the next multiple of four columns. */
-const untab = (text: string) =>
-  text.includes('\t') ? text.replace(/[^\t]*\t/g, run => run.slice(0, -1) + ' '.repeat(4 - ((run.length - 1) % 4))) : text
+function untab(text: string): string {
+  if (!text.includes('\t')) return text
+  return text.replace(/[^\t]*\t/g, run => {
+    const before = run.slice(0, -1)
+    return before + ' '.repeat(4 - (before.length % 4))
+  })
+}
 
 /**
  * Parts cut into rows of at most `width` (20 or more) characters: after the last space that leaves a row at least
@@ -127,10 +140,15 @@ const untab = (text: string) =>
 export function wrap(parts: readonly Part[], width: number): Part[][] {
   const text = parts.map(([, part]) => part).join('')
   const ends: number[] = []
-  for (let start = 0; text.length - start > width; start = ends[ends.length - 1]!) {
+  let start = 0
+  while (text.length - start > width) {
     const space = text.lastIndexOf(' ', start + width - 1)
     const isPairCut = /[\ud800-\udbff]/.test(text[start + width - 1]!)
-    ends.push(space >= start + width / 2 ? space + 1 : isPairCut ? start + width - 1 : start + width)
+    let end = start + width
+    if (space >= start + width / 2) end = space + 1
+    else if (isPairCut) end = start + width - 1
+    ends.push(end)
+    start = end
   }
   ends.push(text.length)
   const rows: Part[][] = ends.map(() => [])
@@ -161,10 +179,13 @@ function hunkLines(h: Hunk, re: RegExp | undefined, digits: number, width: numbe
   let isNewInComment = false
   for (const line of h.lines) {
     const kind = line[0] as ' ' | '-' | '+'
-    const [parts, isOpen] = lex(untab(clean(line.slice(1))), re, kind === '-' ? isOldInComment : isNewInComment)
+    const text = untab(clean(line.slice(1)))
+    const isInComment = kind === '-' ? isOldInComment : isNewInComment
+    const [parts, isOpen] = lex(text, re, isInComment)
     if (kind !== '+') isOldInComment = isOpen
     if (kind !== '-') isNewInComment = isOpen
-    const number = String(kind === '-' ? old : now).padStart(digits)
+    const at = kind === '-' ? old : now
+    const number = String(at).padStart(digits)
     lines.push({ kind, gutter: `${number} ${kind} `, rows: wrap(parts, width) })
     if (kind !== '+') old++
     if (kind !== '-') now++
@@ -175,14 +196,22 @@ function hunkLines(h: Hunk, re: RegExp | undefined, digits: number, width: numbe
 const escape = (text: string) =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/[\ufffe\uffff]/g, '\ufffd')
 
-const code = (parts: readonly Part[]) =>
-  parts.map(([cls, text]) => (cls === '' ? escape(text) : `<tspan class="${cls}">${escape(text)}</tspan>`)).join('')
+/** The parts as SVG text, each colored one in its own tspan. */
+function code(parts: readonly Part[]): string {
+  const spans = parts.map(([cls, text]) => {
+    if (cls === '') return escape(text)
+    return `<tspan class="${cls}">${escape(text)}</tspan>`
+  })
+  return spans.join('')
+}
 
 /** A line's `<text>` from row `at`: the gutter, then its rows, the wrapped ones under the gutter. */
 function lineText(line: Line, at: number, blank: string): string {
   const y = (row: number) => PAD + (at + row) * ROW + BASELINE
+  const gutter = `<tspan class="${GUTTER[line.kind]}">${line.gutter}</tspan>`
+  const first = code(line.rows[0]!)
   const rest = line.rows.slice(1).map((parts, i) => `<tspan x="0" y="${y(i + 1)}">${blank}${code(parts)}</tspan>`)
-  return `<text y="${y(0)}"><tspan class="${GUTTER[line.kind]}">${line.gutter}</tspan>${code(line.rows[0]!)}${rest.join('')}</text>`
+  return `<text y="${y(0)}">${gutter}${first}${rest.join('')}</text>`
 }
 
 function svgOf(rects: string, texts: string, rows: number, columns: number): string {
@@ -205,7 +234,9 @@ export type Drawing = { hunks: DrawnHunk[]; hidden: number }
 export function drawHunks(path: string, hunks: readonly Hunk[], columns: number): Drawing {
   if (hunks.length === 0) return { hunks: [], hidden: 0 }
   const re = syntaxOf(path)
-  const digits = String(Math.max(...hunks.map(h => Math.max(h.oldStart + h.oldLines, h.newStart + h.newLines) - 1))).length
+  // the widest line number: each hunk's last line on its longer side
+  const lastLines = hunks.map(h => Math.max(h.oldStart + h.oldLines, h.newStart + h.newLines) - 1)
+  const digits = String(Math.max(...lastLines)).length
   const width = Math.max(20, columns - digits - 4)
   const blank = ' '.repeat(digits + 3)
   const drawn: DrawnHunk[] = []
@@ -221,7 +252,9 @@ export function drawHunks(path: string, hunks: readonly Hunk[], columns: number)
   const pending = () => SHELL_COST + rects.length + texts.length
   const endRun = () => {
     if (BACKGROUND[run] !== '' && count > runStart) {
-      rects += `<rect y="${PAD + runStart * ROW}" width="100%" height="${(count - runStart) * ROW}" class="${BACKGROUND[run]}"/>`
+      const y = PAD + runStart * ROW
+      const height = (count - runStart) * ROW
+      rects += `<rect y="${y}" width="100%" height="${height}" class="${BACKGROUND[run]}"/>`
     }
     runStart = count
   }
@@ -250,7 +283,9 @@ export function drawHunks(path: string, hunks: readonly Hunk[], columns: number)
       let text = lineText(line, count, blank)
       if (done + pending() + text.length + ROW_COST > FILE_SVG_CAP) {
         hidden = lines.slice(i).filter(rest => rest.kind !== ' ').length
-        for (const rest of hunks.slice(k + 1)) hidden += rest.lines.filter(source => !source.startsWith(' ')).length
+        for (const rest of hunks.slice(k + 1)) {
+          hidden += rest.lines.filter(source => !source.startsWith(' ')).length
+        }
         close(h)
         return { hunks: drawn, hidden }
       }

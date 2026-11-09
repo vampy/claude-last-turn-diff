@@ -385,7 +385,8 @@ describe('rebuildFiles', () => {
     const [file] = rebuild(call('Write', { file_path: A, content: huge }, { result: { ...result, type: 'update' } }))
     expect(file!.added).toBe(20000)
     const shown = file!.hunks.reduce((sum, h) => sum + h.newLines, 0)
-    expect(file!.notes).toEqual([`${20000 - shown} more changed lines not shown`])
+    expect(file!.notes).toEqual([])
+    expect(file!.hidden).toBe(20000 - shown)
     for (const source of blocks(file!.hunks)) {
       expect(source.length).toBeLessThanOrEqual(CODE_CAP)
       expect(parseHunks(source)).toBeGreaterThan(0)

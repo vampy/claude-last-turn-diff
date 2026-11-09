@@ -175,7 +175,8 @@ describe('diff', () => {
     expect(diff?.added).toBe(20000)
     const shown = diff?.hunks.reduce((sum, h) => sum + h.newLines, 0) ?? 0
     expect(shown).toBeLessThan(20000)
-    expect(diff?.notes).toEqual([`${20000 - shown} more changed lines not shown`])
+    expect(diff?.notes).toEqual([])
+    expect(diff?.hidden).toBe(20000 - shown)
   })
 })
 

@@ -15,9 +15,11 @@ export type FileDiff = {
   removed: number
   /** Short marks for the file's row: `new`, `deleted`, `CRLF→LF`, `too large`. */
   badges: string[]
-  /** Sentences shown above the hunks: line endings, end-of-file newline, truncation. */
+  /** Sentences shown above the hunks: line endings, end-of-file newline. */
   notes: string[]
   hunks: Hunk[]
+  /** Changed lines past the per-file cap, left out of `hunks`; absent when none are. */
+  hidden?: number
 }
 
 /** The last main turn to finish that changed files, or ran a shell command and left a note, recorded live. */
