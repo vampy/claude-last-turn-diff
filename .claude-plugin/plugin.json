@@ -1,6 +1,6 @@
 {
   "name": "last-turn-diff",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Shows every file Claude changed in the last turn as one diff pane (/turn-diff), with a summary band above the prompt.",
   "author": { "name": "Daniel Butum" },
   "license": "MIT",
