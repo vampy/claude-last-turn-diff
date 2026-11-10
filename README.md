@@ -1,3 +1,5 @@
+<img src=".claude-plugin/icon.png" alt="" width="112" align="right">
+
 # last-turn-diff
 
 [![version](https://img.shields.io/github/package-json/v/vampy/claude-last-turn-diff?filename=.claude-plugin%2Fplugin.json&label=version)](https://github.com/vampy/claude-last-turn-diff/tags)
