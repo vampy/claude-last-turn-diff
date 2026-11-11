@@ -91,6 +91,18 @@ async function detect($: EngineInterface, cwd: string): Promise<Vcs | null> {
 }
 
 /**
+ * The root holding `cwd`, found again only when the session runs somewhere else than the last search: a Desktop spare
+ * raises session.start in a neutral folder and its claim then moves it, as `/cd` and a worktree move do.
+ */
+async function repoAt($: EngineInterface, cwd: string): Promise<Vcs | null> {
+  const found = await read($, vcs)
+  if (found?.cwd === cwd) return found.repo
+  const repo = await detect($, cwd)
+  await update($, vcs, () => ({ cwd, repo }))
+  return repo
+}
+
+/**
  * The status of the whole repository or workspace; null when it failed, which means no snapshot, never
  * no changes. Plastic writes it to `<prefix>-status.xml`: through a pipe `cm` turns non-ASCII into `?`.
  */
@@ -321,8 +333,10 @@ async function dirtyFile(
   return { before: null, isNew: false, stamp, isBinary: isBinary || text !== undefined }
 }
 
-/** The turn-start status: each listed file into the turn's `pending`, as an Edit's first call puts one. */
-async function snapshotStart($: EngineInterface, repo: Vcs, turnId: string) {
+/** The turn-start status of the root holding `cwd`: each listed file into the turn's `pending`, as an Edit's first call puts one. */
+async function snapshotStart($: EngineInterface, cwd: string, turnId: string) {
+  const repo = await repoAt($, cwd)
+  if (repo === null) return
   const found = await status($, repo, await scratch($))
   if (found === null) return addNote($, turnId, `${repo.kind} status failed at turn start: shell changes are not shown.`)
   const ids = found.entries.map(entry => fileKey(join(repo.root, entry.path)))
@@ -346,7 +360,7 @@ async function snapshotStart($: EngineInterface, repo: Vcs, turnId: string) {
   await update($, recording, rec => {
     if (rec?.turnId !== turnId) return rec
     const added = tracked.filter(id => !rec.keys.includes(id))
-    return { ...rec, base: { rev: found.rev, dirty: ids }, keys: [...rec.keys, ...added] }
+    return { ...rec, base: { repo, rev: found.rev, dirty: ids }, keys: [...rec.keys, ...added] }
   })
 }
 
@@ -356,12 +370,12 @@ async function snapshotStart($: EngineInterface, repo: Vcs, turnId: string) {
  */
 async function shellFiles(
   $: EngineInterface,
-  repo: Vcs,
   rec: Recording,
   touched: ReadonlyMap<string, PendingFile>,
   notes: string[],
 ): Promise<[string, PendingFile][]> {
   const base = rec.base!
+  const repo = base.repo
   if (repo.kind === 'cm' && rec.isCmBusy === true) {
     notes.push('cm update, switch or merge ran this turn: shell changes are not shown.')
     return []
@@ -624,9 +638,9 @@ async function collectTouched($: EngineInterface, rec: Recording, notes: string[
     await update($, { ...PENDING, id }, () => null)
     if (pending?.turnId === rec.turnId) touched.set(id, pending)
   }
-  const repo = await read($, vcs)
-  if (repo !== null && rec.base !== undefined) {
-    const shell = await shellFiles($, repo, rec, touched, notes)
+  // the root the turn-start status read, kept with it: a reload mid-turn clears `vcs`
+  if (rec.base !== undefined) {
+    const shell = await shellFiles($, rec, touched, notes)
     for (const [id, file] of shell) touched.set(id, file)
   }
   return touched
@@ -884,9 +898,9 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'turn-diff', description: "Shows or hides the last turn's file changes" })
     // a change of option reloads the mod: the /config row below may come or go
     $.ui.invalidate('config.describe')
-    let found: Vcs | null = null
-    if (options.shellEdits !== false) found = await detect($, e.cwd)
-    await update($, vcs, () => found)
+    // The root is found at the next turn's start, where the session runs by then: a Desktop spare raises session.start in
+    // a neutral folder before its claim moves it. Cleared, so a reload looks again
+    await update($, vcs, () => null)
     return next(e)
   })
 
@@ -941,10 +955,10 @@ export const register: Register = (on, options) => {
     const turn = await update($, turns, n => n + 1)
     const startedAt = await $.clock.now()
     await update($, recording, () => ({ turnId: e.turnId, turn, prompt: promptLine(e.text), startedAt, keys: [] }))
-    const repo = await read($, vcs)
+    const cwd = await $.session.cwd()
     // Not awaited: a Plastic status takes seconds, so it runs while the model starts, and each tool call but Claude's
-    // edits waits for it, SNAPSHOT_WAIT at most.
-    if (repo !== null) snapshotting = snapshotStart($, repo, e.turnId).catch(() => undefined)
+    // edits waits for it, SNAPSHOT_WAIT at most. Finding the root runs there too, never inside a hook's 10 s budget.
+    if (options.shellEdits !== false) snapshotting = snapshotStart($, cwd, e.turnId).catch(() => undefined)
     return next(e)
   })
 

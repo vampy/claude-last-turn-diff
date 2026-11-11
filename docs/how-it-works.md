@@ -38,9 +38,12 @@ transcript has no copy of the file, the calls' own `structuredPatch`es show one 
 
 ## Shell edits
 
-At session start (and after each reload) the mod asks `git rev-parse --show-toplevel` and
-`cm gwp <cwd> --format={1}` where the session runs; when both answer, the root nearest the cwd wins. It
-never looks for a `.git` folder: an empty one makes git fail.
+At a turn's start, when the session runs somewhere else than the last search (the first turn, and the first after a
+reload), the mod asks `git rev-parse --show-toplevel` and `cm gwp <cwd> --format={1}` where the session runs; when
+both answer, the root nearest the cwd wins. It never looks for a `.git` folder: an empty one makes git fail. Not at
+session start: Claude Desktop starts a session from a pre-warmed process, which raises `session.start` in a neutral
+folder and only then moves to the session's, and `/cd` and a worktree move change the folder too. The search runs
+with the turn-start status, not inside a hook, so a slow `cm` can't run past a hook's 10 s budget.
 
 At turn start it reads the status: `git status --porcelain=v1 -z --untracked-files=all --no-renames`, or
 `cm status --controlledchanged --changed --localdeleted --private --xml=<file>`. It records HEAD or the

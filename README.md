@@ -131,7 +131,7 @@ red and added lines in green:
 - **Claude's edits**: every file Claude's file tools (`Edit`, `Write`, `NotebookEdit`) changed during the turn,
   under any version control or none, including those of the subagents it runs during the turn. Denied and failed
   calls are left out.
-- **Shell edits**: inside the git repository or Plastic SCM workspace the session started in, files changed by
+- **Shell edits**: inside the git repository or Plastic SCM workspace the session runs in, files changed by
   shell commands, scripts and builds too, read from the version control's status before and after the turn. Files
   it ignores (`.gitignore`, Plastic's `ignore.conf`) don't show. A git commit during the turn still shows its
   files. See `shellEdits`.
@@ -252,9 +252,10 @@ More on each:
 
 ### Shell edits
 
-- Shell changes are seen only inside the git repository or Plastic workspace the session started in, and not in
-  files it ignores (`.gitignore`, Plastic's `ignore.conf`). Outside both, only `Edit`, `Write` and `NotebookEdit`
-  calls are seen.
+- Shell changes are seen only inside the git repository or Plastic workspace the session runs in at turn start, and
+  not in files it ignores (`.gitignore`, Plastic's `ignore.conf`). Outside both, only `Edit`, `Write` and
+  `NotebookEdit` calls are seen. A session that moves (`/cd`, a worktree, a Desktop session started from a pre-warmed
+  process) is looked up again at its next turn.
 - Another session's writes, or your editor's, count as the turn's when they land while one of the turn's calls
   runs (a long build, a background server, a question or a permission prompt waiting for you: a call is timed from
   before its prompt, and one you refuse still counts), when they land in a file the turn's `Edit`, `Write` or

@@ -45,6 +45,8 @@ export type Vcs = {
 
 /** The version control's status at turn start. */
 export type Baseline = {
+  /** The repository or workspace the status read; the turn-end status reads it again. */
+  repo: Vcs
   /** git's HEAD ('' before the first commit) or Plastic's loaded changeset. */
   rev: string
   /** `pending` ids of every file the status listed, tracked or past the caps. */
@@ -98,8 +100,8 @@ declare module 'claude-code' {
     'last-turn-diff': {
       /** Main-loop turns started since the mod loaded; slash commands start none. */
       turns: number
-      /** Found at each session start; null with none, or with shellEdits off. */
-      vcs: Vcs | null
+      /** The root holding `cwd`, null with none; the whole null until a turn starts with shellEdits on. */
+      vcs: { cwd: string; repo: Vcs | null } | null
       recording: Recording | null
       pending: StateFamily<PendingFile | null>
       lastTurn: LastTurn | null

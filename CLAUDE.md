@@ -29,8 +29,10 @@ typed in the generated `.claude-plugin/types/claude-code/index.d.ts`: read it fo
 
 A turn through `register.tsx`:
 
-1. `session.start` (also after a hot reload) registers `/turn-diff` and finds the git or Plastic root.
-2. `turn.start` (main loop only) opens `recording` and starts the turn-start status snapshot without awaiting it.
+1. `session.start` (also after a hot reload) registers `/turn-diff` and clears the found root: a Desktop spare raises
+   it in a neutral folder before its claim moves it.
+2. `turn.start` (main loop only) opens `recording` and starts the turn-start status snapshot without awaiting it; the
+   snapshot first finds the git or Plastic root of the cwd, again only when the cwd moved since.
 3. `tool.call`: other calls wait for the snapshot (`SNAPSHOT_WAIT` at most) and are timed into `runs`; `Edit`,
    `Write` and `NotebookEdit` read their file's before-content from disk into `pending` (the tools' `originalFile`
    turns CRLF into LF).

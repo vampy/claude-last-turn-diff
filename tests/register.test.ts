@@ -181,10 +181,13 @@ function world(
   const answer = (exitCode: number, stdout = '') => ({
     value: { exitCode, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   })
-  const git = (args: readonly string[]) => {
+  /** Whether a command runs in the repository or workspace: a folder outside ROOT, a spare's parking one, is in none. */
+  const isInRoot = (cwd: string | undefined) => `${norm(cwd ?? '')}/`.startsWith(ROOT)
+  const git = (args: readonly string[], cwd: string | undefined) => {
     if (vcs !== 'git') return answer(128)
     const [verb, ...rest] = args[0] === '--no-optional-locks' ? args.slice(1) : args
-    if (verb === 'rev-parse') return rest[0] === '--show-toplevel' ? answer(0, 'C:/proj\n') : answer(0, `${head}\n`)
+    if (verb === 'rev-parse' && rest[0] === '--show-toplevel') return isInRoot(cwd) ? answer(0, 'C:/proj\n') : answer(128)
+    if (verb === 'rev-parse') return answer(0, `${head}\n`)
     if (isStatusBroken === true) return answer(128)
     if (verb === 'status') {
       const code = { new: '??', deleted: ' D', changed: ' M' } as const
@@ -219,7 +222,7 @@ function world(
     if (vcs !== 'cm') return { deny: 'cm is not installed' }
     const [verb, ...rest] = args
     const option = (name: string) => rest.find(arg => arg.startsWith(`--${name}=`))?.slice(name.length + 3)
-    if (verb === 'gwp') return answer(0, 'c:\\proj\r\n')
+    if (verb === 'gwp') return isInRoot(rest[0]) ? answer(0, 'c:\\proj\r\n') : answer(1, `${rest[0]} is not in a workspace.`)
     if (isStatusBroken === true) return answer(1, 'Authentication failed for org@cloud.')
     if (verb === 'status') {
       const revisionType = (type: string, key: string) => {
@@ -263,7 +266,7 @@ function world(
       await onStatus?.(statuses)
     }
     const [bin, ...args] = e.argv
-    if (bin === 'git') return git(args)
+    if (bin === 'git') return git(args, e.init?.cwd)
     if (bin === 'cm') return cm(args)
     return { deny: `${bin} is not installed` }
   })
@@ -909,6 +912,27 @@ for (const kind of ['git', 'cm'] as const) {
       expect(svgs.map(svg => svgRows(svg.source))).toEqual([lines])
     })
 
+    // a Desktop spare raises session.start in a neutral folder; its claim then moves it to the session's
+    test('a session that moved after its start finds the root where the turn runs', async ($, on) => {
+      world(on, { [at('b.txt')]: 'b\n' }, { vcs: kind, shell: { fix: fs => fs.put(at('b.txt'), 'B\n') } })
+      await $.session.start({ cwd: 'C:\\Users\\me\\parking', surface: 'desktop', isInteractive: true })
+      await start($, 't1')
+      await bash($, 'fix')
+      await complete($, 't1')
+      expect((await pane($, 'terminal')).rows).toEqual(['b.txt  +1 −1'])
+    })
+
+    test('a reload mid-turn, after the turn-start status, keeps its shell changes', async ($, on) => {
+      world(on, { [at('b.txt')]: 'b\n' }, { vcs: kind, shell: { fix: fs => fs.put(at('b.txt'), 'B\n') } })
+      await begin($)
+      await start($, 't1')
+      await bash($, 'fix')
+      // a reload raises session.start again, which clears the root found
+      await begin($)
+      await complete($, 't1')
+      expect((await pane($, 'terminal')).rows).toEqual(['b.txt  +1 −1'])
+    })
+
     test('a shell edit near the start and the end of a 3,000-line file shows two hunks, not every line between', async ($, on) => {
       const was = Array.from({ length: 3071 }, (_, i) => `line ${i + 1}\n`).join('')
       const now = was.replace('line 53\n', 'LINE 53\n').replace('line 3063\n', 'LINE 3063\n')
@@ -1114,14 +1138,19 @@ describe('shell edits without version control', () => {
   test('git exiting 128 and no cm installed: Edit-only, and nothing runs past detection', async ($, on) => {
     const { calls } = world(on, { [at('a.txt')]: 'a\n', [at('b.txt')]: 'b\n' }, { shell: { fix: fs => fs.put(at('b.txt'), 'B\n') } })
     await begin($)
-    expect(calls).toEqual([
-      ['git', 'rev-parse', '--show-toplevel'],
-      ['cm', 'gwp', CWD, '--format={1}'],
-    ])
+    // the root is looked for at turn start, where the session runs by then
+    expect(calls).toEqual([])
     await start($, 't1')
     await edit($, 'a.txt', 'a', 'A')
     await bash($, 'fix')
     await complete($, 't1')
+    expect(calls).toEqual([
+      ['git', 'rev-parse', '--show-toplevel'],
+      ['cm', 'gwp', CWD, '--format={1}'],
+    ])
+    // the same cwd: not looked for again
+    await start($, 't2')
+    await complete($, 't2')
     expect(calls).toHaveLength(2)
     expect((await pane($, 'terminal')).rows).toEqual(['a.txt  +1 −1'])
   })
