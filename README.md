@@ -7,10 +7,11 @@
 [![License: MIT](https://img.shields.io/github/license/vampy/claude-last-turn-diff)](LICENSE)
 [![Listed on ClaudeMod](https://img.shields.io/badge/Listed%20on-ClaudeMod-10b981)](https://www.claudemod.com/mods/last-turn-diff)
 
-**A Claude Code mod that shows what the last turn changed**: every file, one net diff each, in a pane, like the
-turn diff in Codex. A file edited five times shows once, before the turn against after it, not as five patches to
-step through. Inside a git repository or a Plastic SCM workspace it also shows files that shell commands, scripts
-and builds changed, and earlier turns are a pick away. It works in the terminal and in the Claude Desktop Code tab.
+**A Claude Code mod that shows what Claude changed in its last turn.** You get one diff per file, in a pane next to
+the chat. A file edited five times shows as one diff: before the turn against after it.
+
+In a git repository or a Plastic SCM workspace, it also shows files changed by shell commands, scripts and builds.
+You can also pick an earlier turn. It works in the terminal and in the Claude Desktop Code tab.
 
 ![A Claude Code turn adds due dates to a todo app; when it ends, the Last turn pane opens beside the transcript with the turn's four files and their diffs](docs/media/turn.gif)
 
