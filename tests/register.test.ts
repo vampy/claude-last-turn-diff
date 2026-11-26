@@ -33,7 +33,7 @@ const norm = (path: string) => path.replace(/\\/g, '/').toLowerCase()
 
 const BAND = {
   component: 'AbovePrompt',
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 } as const
 
 /** What a shell command in a test does to the disk. */
@@ -589,11 +589,16 @@ describe('pane', () => {
     await complete($, 't1')
     for (const surface of SURFACES) {
       const ui = await mountPane($, surface)
+      // only the terminal has hotkeys, and its labels show them
+      const isTerminal = surface === 'terminal'
+      const next = isTerminal ? 'Next (n)' : 'Next'
+      const prev = isTerminal ? 'Prev (p)' : 'Prev'
       let drawn = await look(ui)
       expect(drawn.texts).toContain('Page 1 of 3')
-      expect(drawn.buttons).toContain('Next')
-      expect(drawn.buttons).not.toContain('Prev')
+      expect(drawn.buttons).toContain(next)
+      expect(drawn.buttons).not.toContain(prev)
       const pages = [drawn]
+      expect((await ui.find({ key: 'next' }))?.props.hotkey).toBe(isTerminal ? 'n' : undefined)
       await ui.press({ key: 'next' })
       drawn = await look(ui)
       expect(drawn.texts).toContain('Page 2 of 3')
@@ -601,8 +606,9 @@ describe('pane', () => {
       await ui.press({ key: 'row-2' })
       drawn = await look(ui)
       expect(drawn.texts).toContain('Page 3 of 3')
-      expect(drawn.buttons).toContain('Prev')
-      expect(drawn.buttons).not.toContain('Next')
+      expect(drawn.buttons).toContain(prev)
+      expect(drawn.buttons).not.toContain(next)
+      expect((await ui.find({ key: 'prev' }))?.props.hotkey).toBe(isTerminal ? 'p' : undefined)
       pages.push(drawn)
       const shown = ({ codes, svgs }: typeof drawn) => [
         ...new Set([...codes.map(code => code.path), ...svgs.map(svg => svg.alt.replace(/^Diff of (.+?), @@.*$/, '$1'))]),
@@ -700,6 +706,11 @@ describe('band and command', () => {
       await complete($, turn)
       const band = await $.ui.mount({ plugin: PLUGIN, surface, ...BAND })
       expect(textOf(await band.find({ type: 'Text' }))).toBe('Last turn: 1 file +1 −1')
+      const isTerminal = surface === 'terminal'
+      const view = await band.find({ key: 'view' })
+      expect(view?.text).toBe(isTerminal ? 'View (v)' : 'View')
+      expect(view?.props.hotkey).toBe(isTerminal ? 'v' : undefined)
+      expect((await band.find({ key: 'hide' }))?.props.hotkey).toBe(isTerminal ? 'x' : undefined)
       panes.clear()
       await band.press({ key: 'view' })
       expect([...panes]).toEqual(['last-turn-diff'])
@@ -714,6 +725,23 @@ describe('band and command', () => {
     await complete($, 't-last')
     const band = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', ...BAND })
     expect(await band.find({ key: 'view' })).toBeDefined()
+  })
+
+  test('with hotkeys off no button of the band or the pane has or shows a hotkey', { options: { hotkeys: false } }, async ($, on) => {
+    const big = (tag: string) => Array.from({ length: 4000 }, (_, i) => `${tag} ${i}\n`).join('')
+    world(on, { 'C:\\proj\\x.txt': big('x'), 'C:\\proj\\y.txt': big('y') })
+    await start($, 't1')
+    for (const tag of ['x', 'y']) {
+      await $.tool.call({ tool: 'Write', file_path: `${CWD}\\${tag}.txt`, content: big(tag.toUpperCase()) })
+    }
+    await complete($, 't1')
+    const band = await $.ui.mount({ plugin: PLUGIN, surface: 'terminal', ...BAND })
+    const ui = await mountPane($, 'terminal')
+    await ui.press({ key: 'next' })
+    const buttons = [...(await band.findAll({ type: 'Button' })), ...(await ui.findAll({ type: 'Button' }))]
+    expect(buttons.map(found => found.key)).toEqual(expect.arrayContaining(['view', 'hide', 'prev']))
+    expect(buttons.filter(found => found.props.hotkey !== undefined)).toEqual([])
+    expect(buttons.map(found => found.text)).toEqual(expect.arrayContaining(['View', 'x', 'Prev']))
   })
 
   test('the band stays out of the way with no edits, and goes after a turn without them', async ($, on) => {

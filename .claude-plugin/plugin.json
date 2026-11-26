@@ -12,6 +12,12 @@
       "description": "Opens the Last turn pane when a turn ends with file changes.",
       "default": true
     },
+    "hotkeys": {
+      "type": "boolean",
+      "title": "Single-key shortcuts",
+      "description": "In a terminal, while the band has the keyboard (ctrl+x then Tab), v presses View and x hides the band; while the pane has it (click in it), n and p go to the next and previous page. Each button shows its key, as in [ View (v) ]. Off, the buttons show no keys, those keys type into the prompt instead, and Tab and Enter still press the buttons.",
+      "default": true
+    },
     "shellEdits": {
       "type": "boolean",
       "title": "Show shell edits",

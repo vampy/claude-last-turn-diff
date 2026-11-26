@@ -758,15 +758,26 @@ function fileRows({ Box, Button, Text }: PaneUi, files: readonly FileDiff[], wid
   )
 }
 
-/** Prev and Next around the page number, `at` of `last`, both counted from 0. */
-function pager({ Box, Button, Text }: PaneUi, $: EngineInterface, at: number, last: number) {
+/**
+ * Prev and Next around the page number, `at` of `last`, both counted from 0. With `hasHotkeys`, p and n press them and
+ * their labels say so.
+ */
+function pager({ Box, Button, Text }: PaneUi, $: EngineInterface, at: number, last: number, hasHotkeys: boolean) {
+  const prevKey = hasHotkeys ? 'p' : undefined
+  const nextKey = hasHotkeys ? 'n' : undefined
+  const prevLabel = hasHotkeys ? 'Prev (p)' : 'Prev'
+  const nextLabel = hasHotkeys ? 'Next (n)' : 'Next'
   return (
     <Box gap={1} marginTop={1}>
-      {at > 0 && <Button key="prev" label="Prev" onPress={() => update($, page, p => Math.max(0, Math.min(p, last) - 1))} />}
+      {at > 0 && (
+        <Button key="prev" label={prevLabel} hotkey={prevKey} onPress={() => update($, page, p => Math.max(0, Math.min(p, last) - 1))} />
+      )}
       <Text dimColor>
         Page {at + 1} of {last + 1}
       </Text>
-      {at < last && <Button key="next" label="Next" onPress={() => update($, page, p => Math.min(p + 1, last))} />}
+      {at < last && (
+        <Button key="next" label={nextLabel} hotkey={nextKey} onPress={() => update($, page, p => Math.min(p + 1, last))} />
+      )}
     </Box>
   )
 }
@@ -892,6 +903,8 @@ export const register: Register = (on, options) => {
   let hidden: Hidden = 'all'
   if (options.hideClaudeFiles === false) hidden = 'none'
   else if (options.showMemoryAndPlans === true) hidden = 'temp'
+  /** Whether single keys press the band's and the pane's buttons in a terminal: v, x, n and p, shown on the buttons. */
+  const hasHotkeys = options.hotkeys !== false
 
   // Also after a hot reload. With shellEdits off nothing runs, and a version control found before is dropped.
   on('session.start', async ($, e, next) => {
@@ -1134,7 +1147,7 @@ export const register: Register = (on, options) => {
         {picker}
         {header}
         {fileRows(ui, turn.files, width, show)}
-        {last > 0 && pager(ui, $, at, last)}
+        {last > 0 && pager(ui, $, at, last, hasHotkeys && e.surface === 'terminal')}
         {(pages[at] ?? []).map(i => {
           const file = turn.files[i]!
           const framed = runs?.[i]
@@ -1157,6 +1170,11 @@ export const register: Register = (on, options) => {
     const isHidden = await read($, isBandHidden)
     if (isHidden) return next(e)
     const { Box, Button, Text } = $.ui.resolve(e)
+    // the hide button's label is already its key
+    const hasKeys = hasHotkeys && e.surface === 'terminal'
+    const viewKey = hasKeys ? 'v' : undefined
+    const viewLabel = hasKeys ? 'View (v)' : 'View'
+    const hideKey = hasKeys ? 'x' : undefined
     return (
       <Box gap={1}>
         <Text>
@@ -1164,7 +1182,8 @@ export const register: Register = (on, options) => {
         </Text>
         <Button
           key="view"
-          label="View"
+          label={viewLabel}
+          hotkey={viewKey}
           onPress={async () => {
             await resetView($)
             const state = await paneState($, isDrawn)
@@ -1174,7 +1193,7 @@ export const register: Register = (on, options) => {
             await $.ui.open({ id: PANE, title: TITLE })
           }}
         />
-        <Button key="hide" label="x" role="dismiss" onPress={() => update($, isBandHidden, () => true)} />
+        <Button key="hide" label="x" hotkey={hideKey} role="dismiss" onPress={() => update($, isBandHidden, () => true)} />
       </Box>
     )
   })

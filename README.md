@@ -67,7 +67,7 @@ To remove it, run `claude plugin uninstall last-turn-diff@last-turn-diff`, then
    the band, reads:
 
    ```text
-   Last turn: 4 files +68 −14 [ View ] [ x ]
+   Last turn: 4 files +68 −14 [ View (v) ] [ x ]
    ```
 
    View opens the pane again. x hides the band until the next turn with changes.
@@ -77,9 +77,11 @@ To remove it, run `claude plugin uninstall last-turn-diff@last-turn-diff`, then
    back to the last turn with changes.
 
 In a terminal the pane docks beside the transcript in the fullscreen layout from 110 columns, and sits above the
-prompt otherwise. In Desktop, click. In a terminal, press ctrl+x, then Tab, to give the keyboard to the band or the
-pane: Tab moves between its buttons, Enter presses one, the arrows and Enter work the picker, and Escape gives the
-keyboard back to the prompt.
+prompt otherwise. In Desktop, click. In a terminal, press ctrl+x, then Tab, to give the keyboard to the band, or click
+in the docked pane to give it to the pane: Tab moves between its buttons, Enter presses one, the arrows and Enter work
+the picker, and Escape gives the keyboard back to the prompt. While the band has the keyboard, v presses View and x
+hides the band. While the pane has it, n and p go to the next and previous page. Each button shows its key, as in
+`[ View (v) ]` (turn these keys off with `hotkeys`).
 
 ## If the pane doesn't show
 
@@ -188,6 +190,7 @@ limits as `/diff`'s: Claude's own calls only, often shown call by call (see [Ear
 | Option | Default | What it does |
 | --- | --- | --- |
 | `autoOpen` | on | Opens the pane by itself when a turn ends with file changes. |
+| `hotkeys` | on | In a terminal, lets single keys press the band's and the pane's buttons, each button showing its key: v, x, n and p. |
 | `shellEdits` | on | Also shows files changed by shell commands, scripts and builds, from git or Plastic SCM status. |
 | `turnHistory` | on | Lists the conversation's turns in the pane, so an earlier one can be picked and rebuilt. |
 | `hideClaudeFiles` | on | Leaves out Claude Code's own temporary, memory and plan files. |
