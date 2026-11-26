@@ -5,6 +5,7 @@
 [![version](https://img.shields.io/github/package-json/v/vampy/claude-last-turn-diff?filename=.claude-plugin%2Fplugin.json&label=version)](https://github.com/vampy/claude-last-turn-diff/tags)
 [![Claude Code 2.1.289+](https://img.shields.io/badge/Claude%20Code-2.1.289%2B-D97757)](#install)
 [![License: MIT](https://img.shields.io/github/license/vampy/claude-last-turn-diff)](LICENSE)
+[![Listed on ClaudeMod](https://img.shields.io/badge/Listed%20on-ClaudeMod-10b981)](https://www.claudemod.com/mods/last-turn-diff)
 
 **A Claude Code mod that shows what the last turn changed**: every file, one net diff each, in a pane, like the
 turn diff in Codex. A file edited five times shows once, before the turn against after it, not as five patches to
