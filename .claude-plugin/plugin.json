@@ -1,7 +1,7 @@
 {
   "name": "last-turn-diff",
   "version": "0.1.3",
-  "description": "Shows every file Claude changed in the last turn as one diff pane (/turn-diff), with a summary band above the prompt.",
+  "description": "Shows what Claude changed in its last turn: one diff per file, in a pane next to the chat. Open it any time with /turn-diff.",
   "author": { "name": "Daniel Butum" },
   "license": "MIT",
   "types": "./types/index.d.ts",

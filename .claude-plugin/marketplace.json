@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "last-turn-diff",
-      "description": "Shows every file Claude changed in the last turn as one diff pane (/turn-diff), with a summary band above the prompt.",
+      "description": "Shows what Claude changed in its last turn: one diff per file, in a pane next to the chat. Open it any time with /turn-diff.",
       "source": "./"
     }
   ]
